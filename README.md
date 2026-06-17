@@ -1,7 +1,7 @@
 # Lazy AI
 
 An always-on AI overlay companion for **Windows** that does the tedious work so you don't
-have to
+have toc
 
 > **Roadmap:** [PROJECT_PLAN.md](PROJECT_PLAN.md) · **Agent/dev notes:** [CLAUDE.md](CLAUDE.md)
 

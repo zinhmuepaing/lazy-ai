@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self';" />
+    <title>Lazy AI — Screen Teacher</title>
+    <link rel="stylesheet" href="overlay.css" />
+  </head>
+  <body>
+    <!-- Annotations are drawn here. Sized to the screenshot's pixel dimensions
+         and stretched over the whole screen, so AI pixel coords map 1:1. -->
+    <canvas id="overlay-canvas"></canvas>
+
+    <!-- Control bar: ask a question, read the answer, dismiss. -->
+    <div id="bar">
+      <span class="bar-title">Screen<b>Teacher</b></span>
+      <input id="question" type="text" placeholder="ask about what's on your screen… (Enter to ask, Esc to close)" />
+      <button id="micBtn" class="ghost" title="Click to speak your question">🎤</button>
+      <button id="askBtn" class="primary">Ask</button>
+      <button id="ttsBtn" class="ghost" title="Speech on — click to mute">🔊</button>
+      <button id="closeBtn" class="close-btn" title="Close (Esc)">✕</button>
+    </div>
+    <div id="answer"></div>
+
+    <script src="overlay.js"></script>
+  </body>
+</html>

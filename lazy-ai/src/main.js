@@ -19,6 +19,9 @@ const {
   globalShortcut,
   nativeImage,
   clipboard,
+  desktopCapturer,
+  screen,
+  session,
 } = require("electron");
 
 // Load .env from the project root (one level up from src/).
@@ -28,6 +31,16 @@ const { MODELS, DEFAULT_MODEL, polish, extractTextFromFile } = require("./polish
 const { startLocalServer } = require("./local-server");
 const winAutomation = require("./win-automation");
 const settingsStore = require("./settings-store");
+const screenTeacher = require("./screen-teacher");
+const voiceEngine = require("./voice-engine");
+
+// Screen Teacher summon hotkeys, in preference order (separate from the polish
+// summon key). Stage 4.
+const SCREEN_TEACHER_CANDIDATES = [
+  "CommandOrControl+Shift+S",
+  "CommandOrControl+Alt+S",
+  "CommandOrControl+Shift+G",
+];
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -53,9 +66,12 @@ function prettyHotkey(accelerator) {
 
 let mainWindow = null;
 let settingsWindow = null;
+let overlayWindow = null;
 let tray = null;
-let activeHotkey = null; // the accelerator we actually managed to register
+let activeHotkey = null; // the summon accelerator we actually managed to register
+let activeScreenHotkey = null; // the Screen Teacher accelerator we registered
 let sourceHwnd = null; // window the selection came from, to paste back into
+let lastScreenshot = null; // { base64, mediaType, width, height } for Screen Teacher
 
 // ---------------------------------------------------------------------------
 // Single-instance lock — a global hotkey + tray must own exactly one process.
@@ -132,6 +148,32 @@ ipcMain.handle("polish", async (_event, payload) => polish(payload));
 
 // Renderer asks to dismiss the popup (Esc key or the ✕ button).
 ipcMain.on("hide-window", () => mainWindow?.hide());
+
+// Screen Teacher: answer a question about the screenshot main captured.
+ipcMain.handle("screen-ask", async (_event, question) => {
+  if (!lastScreenshot) return { ok: false, error: "No screenshot captured. Press the Screen Teacher hotkey again." };
+  return screenTeacher.askAboutScreen({
+    imageBase64: lastScreenshot.base64,
+    mediaType: lastScreenshot.mediaType,
+    question,
+    imageWidth: lastScreenshot.width,
+    imageHeight: lastScreenshot.height,
+  });
+});
+
+ipcMain.on("hide-overlay", () => overlayWindow?.hide());
+
+// Screen Teacher voice input: transcribe mic audio locally via Whisper, then
+// clean up likely speech-to-text errors with a fast model before using it.
+ipcMain.handle("transcribe", async (_event, audio) => {
+  try {
+    const raw = await voiceEngine.transcribe(audio);
+    const text = await screenTeacher.cleanVoiceQuery(raw);
+    return { ok: true, text, raw };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
 
 // Renderer accepted a result and wants it pasted back into the source app.
 ipcMain.on("paste-result", async (_event, text) => {
@@ -248,9 +290,11 @@ function applyTrayMenu() {
   if (!tray) return;
   const hotkeyLabel = activeHotkey ? prettyHotkey(activeHotkey) : "no hotkey — set one in Settings";
   tray.setToolTip(`Lazy AI — press ${hotkeyLabel}`);
+  const screenLabel = activeScreenHotkey ? prettyHotkey(activeScreenHotkey) : "no hotkey";
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: `Open Lazy AI  (${hotkeyLabel})`, click: () => showPopup() },
+      { label: `Ask about my screen  (${screenLabel})`, click: () => showScreenTeacher() },
       { label: "Settings…", click: openSettings },
       { type: "separator" },
       {
@@ -304,7 +348,9 @@ function openSettings() {
 // through the candidate list if it's unavailable. Returns the accelerator that
 // actually bound, or null if none did.
 function registerSummonHotkey(preferred) {
-  globalShortcut.unregisterAll();
+  // Unregister only our own previous summon key, so re-registering on a
+  // settings save doesn't also drop the Screen Teacher hotkey.
+  if (activeHotkey) globalShortcut.unregister(activeHotkey);
   activeHotkey = null;
   const order = [preferred, ...HOTKEY_CANDIDATES].filter(Boolean);
   for (const candidate of order) {
@@ -316,11 +362,135 @@ function registerSummonHotkey(preferred) {
   return activeHotkey;
 }
 
+function registerScreenTeacherHotkey() {
+  for (const candidate of SCREEN_TEACHER_CANDIDATES) {
+    if (globalShortcut.register(candidate, showScreenTeacher)) {
+      activeScreenHotkey = candidate;
+      break;
+    }
+  }
+  if (activeScreenHotkey) {
+    console.log(`[lazy-ai] Screen Teacher hotkey: ${prettyHotkey(activeScreenHotkey)}`);
+  } else {
+    console.error(`[lazy-ai] Could not register any Screen Teacher hotkey — all candidates are in use.`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Screen Teacher (Stage 4): screenshot → ask Claude → draw answer on a
+// transparent click-safe overlay.
+// ---------------------------------------------------------------------------
+
+// Capture the primary display at full physical resolution so the AI's
+// pixel coordinates line up with what's on screen.
+async function captureScreen() {
+  const display = screen.getPrimaryDisplay();
+  const { width, height } = display.size; // CSS pixels
+  const scaleFactor = display.scaleFactor || 1;
+  const sources = await desktopCapturer.getSources({
+    types: ["screen"],
+    thumbnailSize: {
+      width: Math.round(width * scaleFactor),
+      height: Math.round(height * scaleFactor),
+    },
+  });
+  const source =
+    sources.find((s) => String(s.display_id) === String(display.id)) || sources[0];
+  if (!source) throw new Error("No screen source available");
+
+  let image = source.thumbnail;
+  let size = image.getSize();
+
+  // Cap the long edge to the active model's high-res vision limit, so the model
+  // isn't silently downscaling the image (which throws its coordinates off).
+  // The overlay sizes its canvas to these dimensions, so coordinates stay 1:1.
+  const MAX_LONG_EDGE = screenTeacher.MAX_IMAGE_LONG_EDGE;
+  const longEdge = Math.max(size.width, size.height);
+  if (longEdge > MAX_LONG_EDGE) {
+    const scale = MAX_LONG_EDGE / longEdge;
+    image = image.resize({
+      width: Math.round(size.width * scale),
+      height: Math.round(size.height * scale),
+    });
+    size = image.getSize();
+  }
+
+  return {
+    base64: image.toPNG().toString("base64"),
+    mediaType: "image/png",
+    width: size.width,
+    height: size.height,
+  };
+}
+
+function createOverlayWindow() {
+  const display = screen.getPrimaryDisplay();
+  overlayWindow = new BrowserWindow({
+    ...display.bounds, // x, y, width, height of the primary display
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    fullscreenable: false,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  overlayWindow.setAlwaysOnTop(true, "screen-saver");
+  overlayWindow.loadFile(path.join(__dirname, "overlay.html"));
+  overlayWindow.on("close", (event) => {
+    if (!app.isQuitting) {
+      event.preventDefault();
+      overlayWindow.hide();
+    }
+  });
+}
+
+async function showScreenTeacher() {
+  // Toggle off if already up.
+  if (overlayWindow && overlayWindow.isVisible()) {
+    overlayWindow.hide();
+    return;
+  }
+  // Get our own windows out of the shot before capturing.
+  if (mainWindow && mainWindow.isVisible()) mainWindow.hide();
+  if (overlayWindow && overlayWindow.isVisible()) overlayWindow.hide();
+  await delay(150);
+
+  try {
+    lastScreenshot = await captureScreen();
+  } catch (err) {
+    console.error(`[lazy-ai] Screenshot failed: ${err.message}`);
+    return;
+  }
+
+  if (!overlayWindow) createOverlayWindow();
+  overlayWindow.setBounds(screen.getPrimaryDisplay().bounds);
+  overlayWindow.show();
+  overlayWindow.focus();
+  overlayWindow.webContents.send("overlay-show", {
+    imageWidth: lastScreenshot.width,
+    imageHeight: lastScreenshot.height,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
 function init() {
   settingsStore.injectKeysIntoEnv(); // stored keys override .env before any call
+
+  // Allow the Screen Teacher overlay to use the microphone (Whisper voice input).
+  // Local single-user app: grant media; the audio is transcribed on-device.
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    callback(permission === "media" || permission === "microphone" || permission === "audioCapture");
+  });
+
   startLocalServer(); // serve localhost:8788 for the browser extension
   createWindow();
 
@@ -332,6 +502,7 @@ function init() {
     console.error(`[lazy-ai] Could not register any summon hotkey — all candidates are in use. Open from the tray instead.`);
   }
 
+  registerScreenTeacherHotkey();
   createTray();
 }
 

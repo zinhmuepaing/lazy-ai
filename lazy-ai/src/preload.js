@@ -22,4 +22,13 @@ contextBridge.exposeInMainWorld("lazyAI", {
   saveSettings: (payload) => ipcRenderer.invoke("save-settings", payload),
   // Fires when settings change, so the popup can refresh its model dropdown.
   onSettingsUpdated: (callback) => ipcRenderer.on("settings-updated", () => callback()),
+
+  // Screen Teacher overlay (Stage 4):
+  // Fires when the overlay is summoned; data carries the screenshot pixel size.
+  onOverlayShow: (callback) => ipcRenderer.on("overlay-show", (_event, data) => callback(data || {})),
+  // Ask Claude about the screenshot main captured; returns { ok, instructions, explanation }.
+  askScreen: (question) => ipcRenderer.invoke("screen-ask", question),
+  hideOverlay: () => ipcRenderer.send("hide-overlay"),
+  // Transcribe 16 kHz mono PCM (Float32Array) locally via Whisper → { ok, text }.
+  transcribe: (audio) => ipcRenderer.invoke("transcribe", audio),
 });
