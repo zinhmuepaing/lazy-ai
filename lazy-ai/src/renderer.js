@@ -10,8 +10,25 @@ const els = {
   polishBtn: document.getElementById("polishBtn"),
   output: document.getElementById("output"),
   copyBtn: document.getElementById("copyBtn"),
+  pasteBtn: document.getElementById("pasteBtn"),
   status: document.getElementById("status"),
+  closeBtn: document.getElementById("closeBtn"),
 };
+
+// ---- Summon-popup behaviour (Stage 3) ------------------------------------
+// Dismiss with Esc or the ✕ button; focus the prompt box each time we're shown,
+// prefilled with whatever text was selected in the app the user came from.
+els.closeBtn.addEventListener("click", () => window.lazyAI.hideWindow());
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") window.lazyAI.hideWindow();
+});
+window.lazyAI.onShow((data) => {
+  if (data.selectionText && data.selectionText.trim()) {
+    els.prompt.value = data.selectionText;
+  }
+  els.prompt.focus();
+  els.prompt.select();
+});
 
 // Holds the parsed text of the attached file, if any.
 let attachedFile = null; // { name, text }
@@ -59,6 +76,7 @@ els.polishBtn.addEventListener("click", async () => {
 
   els.polishBtn.disabled = true;
   els.copyBtn.disabled = true;
+  els.pasteBtn.disabled = true;
   setStatus("Polishing…", "loading");
 
   const result = await window.lazyAI.polish({
@@ -74,7 +92,8 @@ els.polishBtn.addEventListener("click", async () => {
   if (result.ok) {
     els.output.value = result.text;
     els.copyBtn.disabled = false;
-    setStatus("Done.", "ok");
+    els.pasteBtn.disabled = false;
+    setStatus("Done. Paste back, or copy.", "ok");
   } else {
     setStatus(result.error, "err");
   }
@@ -86,4 +105,12 @@ els.copyBtn.addEventListener("click", async () => {
   setStatus("Copied to clipboard.", "ok");
 });
 
+// Paste-back button — hand the result to the main process, which restores the
+// source app and sends Ctrl+V. The popup hides as part of that.
+els.pasteBtn.addEventListener("click", () => {
+  if (!els.output.value) return;
+  window.lazyAI.pasteResult(els.output.value);
+});
+
 loadModels();
+window.lazyAI.onSettingsUpdated(loadModels); // re-sync default model after Settings save

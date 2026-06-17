@@ -1,8 +1,7 @@
 # Lazy AI
 
 An always-on AI overlay companion for **Windows** that does the tedious work so you don't
-have to. Inspired by [Clicky](https://www.heyclicky.com/) (Farza's macOS app, kept in
-[`reference/`](reference/) for study), rebuilt from scratch for Windows.
+have to
 
 > **Roadmap:** [PROJECT_PLAN.md](PROJECT_PLAN.md) · **Agent/dev notes:** [CLAUDE.md](CLAUDE.md)
 
@@ -68,13 +67,7 @@ The desktop app must be running — it's the brain the extension calls.
 Model ids are defined in `lazy-ai/src/polish-engine.js`. If a provider 404s on a model,
 fix the `apiModel` value there (ids use dashes, not dots).
 
-## `reference/`
-
-Farza's original open-source macOS Clicky app, quarantined here purely as a reference
-while we build the Windows version. Not part of the Lazy AI build. See
-[`reference/AGENTS.md`](reference/AGENTS.md) for its architecture. It will be removed once
-Lazy AI is complete (with approval first).
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Original Clicky by [@farzatv](https://x.com/farzatv).
+MIT — see [LICENSE](LICENSE). Original Lazy AI by [@Paing](https://github.com/zinhmuepaing).

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self';" />
+    <title>Lazy AI — Settings</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <div class="title-block">
+        <h1>Settings</h1>
+        <p class="tagline">summon hotkey · default model · API keys</p>
+      </div>
+    </header>
+
+    <main>
+      <label class="field-label" for="hotkey">Summon hotkey</label>
+      <select id="hotkey"></select>
+      <p id="activeHotkey" class="hint"></p>
+
+      <label class="field-label" for="defaultModel">Default model</label>
+      <select id="defaultModel"></select>
+
+      <label class="field-label">API keys <span class="optional">(stored encrypted; leave blank to keep current)</span></label>
+
+      <label class="key-label" for="key-anthropic">Anthropic <span id="status-anthropic" class="key-status"></span></label>
+      <input id="key-anthropic" type="password" placeholder="sk-ant-..." autocomplete="off" />
+
+      <label class="key-label" for="key-gemini">Google Gemini <span id="status-gemini" class="key-status"></span></label>
+      <input id="key-gemini" type="password" placeholder="AIza..." autocomplete="off" />
+
+      <label class="key-label" for="key-openai">OpenAI <span id="status-openai" class="key-status"></span></label>
+      <input id="key-openai" type="password" placeholder="sk-..." autocomplete="off" />
+
+      <button id="saveBtn" class="primary">Save settings</button>
+      <span id="status" class="status"></span>
+    </main>
+
+    <script src="settings.js"></script>
+  </body>
+</html>

@@ -9,8 +9,11 @@
   </head>
   <body>
     <header>
-      <h1>Lazy<span>AI</span></h1>
-      <p class="tagline">paste a messy prompt — get a clean one back</p>
+      <div class="title-block">
+        <h1>Lazy<span>AI</span></h1>
+        <p class="tagline">paste a messy prompt — get a clean one back</p>
+      </div>
+      <button id="closeBtn" class="close-btn" title="Close (Esc)">✕</button>
     </header>
 
     <main>
@@ -38,7 +41,10 @@
       <textarea id="output" rows="9" placeholder="your clean prompt will appear here..." readonly></textarea>
 
       <div class="row">
-        <button id="copyBtn" class="primary" disabled>📋 Copy</button>
+        <div class="result-actions">
+          <button id="pasteBtn" class="primary" disabled>⤵ Paste back</button>
+          <button id="copyBtn" class="ghost" disabled>📋 Copy</button>
+        </div>
         <span id="status" class="status"></span>
       </div>
     </main>

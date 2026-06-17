@@ -61,6 +61,21 @@ function startLocalServer() {
       return;
     }
 
+    // Friendly landing page for a human who types the URL into a browser —
+    // otherwise the bare "/" hits the 404 below and looks broken.
+    if (req.method === "GET" && req.url === "/") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(
+        `<!doctype html><meta charset="utf-8"><title>Lazy AI</title>` +
+          `<body style="font-family:Segoe UI,system-ui,sans-serif;background:#0f1115;color:#e6e8ec;padding:40px">` +
+          `<h1 style="margin:0">Lazy<span style="color:#6d7cff">AI</span> server is running ✅</h1>` +
+          `<p style="color:#8b93a1">This is the local engine on <code>localhost:8788</code>. ` +
+          `It answers <code>POST /polish</code> and <code>GET /health</code> — nothing to see here in a browser. ` +
+          `The browser extension talks to it automatically.</p></body>`
+      );
+      return;
+    }
+
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: false, error: "Not found" }));
   });
