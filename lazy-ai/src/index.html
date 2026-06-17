@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self';" />
+    <link rel="icon" type="image/png" href="../assets/icon.png" />
+    <title>Lazy AI</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Lazy<span>AI</span></h1>
+      <p class="tagline">paste a messy prompt — get a clean one back</p>
+    </header>
+
+    <main>
+      <label class="field-label" for="prompt">Your prompt</label>
+      <textarea id="prompt" rows="7" placeholder="type or paste your rough prompt here..."></textarea>
+
+      <label class="field-label" for="context">Context / style <span class="optional">(optional)</span></label>
+      <input id="context" type="text" placeholder="e.g. write like a senior dev · output as a table · I'm a beginner" />
+
+      <div class="row">
+        <div class="file-area">
+          <button id="fileBtn" class="ghost">📎 Attach file</button>
+          <span id="fileName" class="file-name"></span>
+        </div>
+
+        <div class="model-area">
+          <label class="field-label inline" for="model">Model</label>
+          <select id="model"></select>
+        </div>
+      </div>
+
+      <button id="polishBtn" class="primary">✨ Polish</button>
+
+      <label class="field-label" for="output">Polished prompt</label>
+      <textarea id="output" rows="9" placeholder="your clean prompt will appear here..." readonly></textarea>
+
+      <div class="row">
+        <button id="copyBtn" class="primary" disabled>📋 Copy</button>
+        <span id="status" class="status"></span>
+      </div>
+    </main>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>

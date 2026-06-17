@@ -1,0 +1,110 @@
+/* Lazy AI extension — injected UI. High z-index so it floats above page content. */
+
+#lazy-ai-fab {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: none;
+  background: center / cover no-repeat;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(109, 124, 255, 0.45);
+  z-index: 2147483646;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  padding: 0;
+  font-size: 0;
+}
+#lazy-ai-fab:hover {
+  transform: scale(1.08);
+  box-shadow: 0 8px 26px rgba(109, 124, 255, 0.6);
+}
+
+#lazy-ai-panel {
+  position: fixed;
+  right: 22px;
+  bottom: 80px;
+  width: 360px;
+  background: #181b22;
+  color: #e6e8ec;
+  border: 1px solid #2b303b;
+  border-radius: 14px;
+  padding: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  z-index: 2147483647;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+#lazy-ai-panel .la-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+#lazy-ai-panel .la-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+#lazy-ai-panel .la-title b {
+  color: #6d7cff;
+  font-weight: 700;
+}
+#lazy-ai-panel .la-model {
+  margin-left: auto;
+  background: #1f232c;
+  color: #e6e8ec;
+  border: 1px solid #2b303b;
+  border-radius: 8px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+#lazy-ai-panel .la-close {
+  background: transparent;
+  border: none;
+  color: #8b93a1;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+#lazy-ai-panel .la-status {
+  font-size: 12px;
+  color: #8b93a1;
+  min-height: 16px;
+  margin-bottom: 6px;
+}
+#lazy-ai-panel .la-status.ok { color: #3ecf8e; }
+#lazy-ai-panel .la-status.err { color: #ff6b6b; }
+#lazy-ai-panel .la-status.loading { color: #6d7cff; }
+
+#lazy-ai-panel .la-output {
+  width: 100%;
+  box-sizing: border-box;
+  background: #1f232c;
+  color: #e6e8ec;
+  border: 1px solid #2b303b;
+  border-radius: 10px;
+  padding: 10px;
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+#lazy-ai-panel .la-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+#lazy-ai-panel .la-actions button {
+  flex: 1;
+  border: none;
+  border-radius: 8px;
+  padding: 9px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+#lazy-ai-panel .la-replace { background: #6d7cff; color: white; }
+#lazy-ai-panel .la-replace:hover { background: #5868f0; }
+#lazy-ai-panel .la-copy { background: #2b303b; color: #e6e8ec; }
+#lazy-ai-panel .la-copy:hover { background: #353b48; }

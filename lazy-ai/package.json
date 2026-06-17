@@ -1,0 +1,19 @@
+{
+  "name": "lazy-ai",
+  "version": "0.1.0",
+  "description": "Lazy AI — an always-on AI overlay companion for Windows. Stage 2: Prompt Polisher.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.0.0"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "mammoth": "^1.8.0",
+    "pdf-parse": "^1.1.1"
+  }
+}

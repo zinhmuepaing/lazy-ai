@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Lazy AI",
+  "version": "0.1.0",
+  "description": "Polish your messy prompts in place — without leaving the tab. Talks to the Lazy AI desktop app.",
+  "permissions": ["storage"],
+  "host_permissions": ["http://localhost:8788/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["icon.png"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
+  "action": {
+    "default_title": "Lazy AI — polish the focused text box",
+    "default_icon": {
+      "16": "icon.png",
+      "48": "icon.png",
+      "128": "icon.png"
+    }
+  }
+}

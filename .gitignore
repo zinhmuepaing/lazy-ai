@@ -1,0 +1,13 @@
+worker/node_modules/
+worker/.dev.vars
+.DS_Store
+*.xcuserstate
+build/
+releases/
+.claude/
+coding-plans/
+
+# Local-only docs and quarantined reference material (not for the repo)
+reference/
+PROJECT_PLAN.md
+CLAUDE.md
