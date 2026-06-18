@@ -29,6 +29,10 @@ contextBridge.exposeInMainWorld("lazyAI", {
   // Ask Claude about the screenshot main captured; returns { ok, instructions, explanation }.
   askScreen: (question) => ipcRenderer.invoke("screen-ask", question),
   hideOverlay: () => ipcRenderer.send("hide-overlay"),
+  // Toggle the overlay's click-through: pass true to let clicks fall through to
+  // the app underneath (annotations don't trap the cursor); false while the
+  // pointer is over the control bar so its buttons/input stay usable.
+  setIgnoreMouse: (ignore) => ipcRenderer.send("overlay-set-ignore-mouse", ignore),
   // Transcribe 16 kHz mono PCM (Float32Array) locally via Whisper → { ok, text }.
   transcribe: (audio) => ipcRenderer.invoke("transcribe", audio),
 });

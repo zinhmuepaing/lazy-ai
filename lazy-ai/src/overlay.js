@@ -5,6 +5,7 @@
 const canvas = document.getElementById("overlay-canvas");
 const ctx = canvas.getContext("2d");
 const els = {
+  bar: document.getElementById("bar"),
   question: document.getElementById("question"),
   askBtn: document.getElementById("askBtn"),
   micBtn: document.getElementById("micBtn"),
@@ -34,21 +35,34 @@ function setAnswer(text, kind = "") {
 }
 
 // ---- Drawing primitives (coordinates are screenshot pixels) ---------------
+// Every shape is drawn through an `anim` object so the walkthrough can reveal it
+// over time: { progress 0→1 (entrance), pulse 0→1 (breathing glow), alpha }.
 const ACCENT = "#6d7cff";
-const LABEL_BG = "rgba(109, 124, 255, 0.92)";
-// Line width scales with image size so HiDPI screenshots don't render hairlines.
-const STROKE = Math.max(4, Math.round(imageWidth / 480));
+const LABEL_BG = "rgba(109, 124, 255, 0.96)";
 
-function styleStroke() {
-  ctx.strokeStyle = ACCENT;
-  ctx.fillStyle = ACCENT;
-  ctx.lineWidth = STROKE;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
+// Line width scales with the screenshot size so HiDPI captures don't hairline.
+function baseStroke() {
+  return Math.max(4, Math.round(imageWidth / 420));
 }
 
-function drawLabel(x, y, text) {
+const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+const STATIC = { progress: 1, pulse: 0, alpha: 1 }; // fully-revealed, no glow
+
+function styleStroke(pulse) {
+  ctx.strokeStyle = ACCENT;
+  ctx.fillStyle = ACCENT;
+  ctx.lineWidth = baseStroke() * (0.85 + 0.35 * pulse);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.shadowColor = ACCENT;
+  ctx.shadowBlur = 18 * pulse; // the "highlight" — pulses while a step is spoken
+}
+
+function drawLabel(x, y, text, alpha = 1) {
   if (!text) return;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.shadowBlur = 0;
   const fontSize = Math.max(18, Math.round(imageWidth / 90));
   ctx.font = `600 ${fontSize}px "Segoe UI", system-ui, sans-serif`;
   const padding = fontSize * 0.4;
@@ -64,64 +78,89 @@ function drawLabel(x, y, text) {
   ctx.fill();
   ctx.fillStyle = "#fff";
   ctx.fillText(text, lx + padding, ly + fontSize + padding * 0.6);
+  ctx.restore();
 }
 
-function drawArrow(from, to, label) {
-  styleStroke();
+function drawArrow(from, to, label, a) {
+  const { progress, pulse, alpha } = a;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  styleStroke(pulse);
   const [x1, y1] = from;
   const [x2, y2] = to;
+  // shaft grows from tail to tip as the step is narrated
+  const tipX = x1 + (x2 - x1) * progress;
+  const tipY = y1 + (y2 - y1) * progress;
   ctx.beginPath();
   ctx.moveTo(x1, y1);
-  ctx.lineTo(x2, y2);
+  ctx.lineTo(tipX, tipY);
   ctx.stroke();
-  // arrowhead
-  const angle = Math.atan2(y2 - y1, x2 - x1);
-  const head = STROKE * 4;
-  ctx.beginPath();
-  ctx.moveTo(x2, y2);
-  ctx.lineTo(x2 - head * Math.cos(angle - Math.PI / 6), y2 - head * Math.sin(angle - Math.PI / 6));
-  ctx.lineTo(x2 - head * Math.cos(angle + Math.PI / 6), y2 - head * Math.sin(angle + Math.PI / 6));
-  ctx.closePath();
-  ctx.fill();
-  if (label) drawLabel(x1, y1 - 10, label);
+  // arrowhead fades in over the last stretch, riding the current tip
+  if (progress > 0.55) {
+    ctx.globalAlpha = alpha * Math.min(1, (progress - 0.55) / 0.45);
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    const head = baseStroke() * 4;
+    ctx.beginPath();
+    ctx.moveTo(tipX, tipY);
+    ctx.lineTo(tipX - head * Math.cos(angle - Math.PI / 6), tipY - head * Math.sin(angle - Math.PI / 6));
+    ctx.lineTo(tipX - head * Math.cos(angle + Math.PI / 6), tipY - head * Math.sin(angle + Math.PI / 6));
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+  if (label && progress > 0.5) drawLabel(x1, y1 - 10, label, alpha * Math.min(1, (progress - 0.5) / 0.5));
 }
 
-function drawBox(x, y, w, h, label) {
-  styleStroke();
-  ctx.strokeRect(x, y, w, h);
-  if (label) drawLabel(x, y - 6, label);
+function drawBox(x, y, w, h, label, a) {
+  const { progress, pulse, alpha } = a;
+  ctx.save();
+  ctx.globalAlpha = alpha * Math.min(1, progress / 0.4); // fade in early
+  styleStroke(pulse);
+  // a touch of grow-from-center on entrance, settling to the true rect
+  const s = 0.94 + 0.06 * easeOut(progress);
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  ctx.strokeRect(cx - (w * s) / 2, cy - (h * s) / 2, w * s, h * s);
+  ctx.restore();
+  if (label && progress > 0.4) drawLabel(x, y - 6, label, alpha);
 }
 
-function drawCircle(cx, cy, r, label) {
-  styleStroke();
+function drawCircle(cx, cy, r, label, a) {
+  const { progress, pulse, alpha } = a;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  styleStroke(pulse);
   ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress); // sweep in
   ctx.stroke();
-  if (label) drawLabel(cx - r, cy - r - 6, label);
+  ctx.restore();
+  if (label && progress > 0.5) drawLabel(cx - r, cy - r - 6, label, alpha);
 }
 
-function drawLine(from, to) {
-  styleStroke();
+function drawLine(from, to, a) {
+  const { progress, pulse, alpha } = a;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  styleStroke(pulse);
   ctx.beginPath();
   ctx.moveTo(from[0], from[1]);
-  ctx.lineTo(to[0], to[1]);
+  ctx.lineTo(from[0] + (to[0] - from[0]) * progress, from[1] + (to[1] - from[1]) * progress);
   ctx.stroke();
+  ctx.restore();
 }
 
-function render(instructions) {
-  clearCanvas();
-  for (const ins of instructions || []) {
-    try {
-      switch (ins.shape) {
-        case "arrow": drawArrow(ins.from, ins.to, ins.label); break;
-        case "box": drawBox(ins.x, ins.y, ins.w, ins.h, ins.label); break;
-        case "circle": drawCircle(ins.x, ins.y, ins.r, ins.label); break;
-        case "line": drawLine(ins.from, ins.to); break;
-        case "label": drawLabel(ins.x, ins.y, ins.text); break;
-      }
-    } catch {
-      // ignore a single malformed instruction
+// Draw one [DRAW] shape at the given animation phase.
+function drawInstruction(ins, a) {
+  try {
+    switch (ins.shape) {
+      case "arrow": drawArrow(ins.from, ins.to, ins.label, a); break;
+      case "box": drawBox(ins.x, ins.y, ins.w, ins.h, ins.label, a); break;
+      case "circle": drawCircle(ins.x, ins.y, ins.r, ins.label, a); break;
+      case "line": drawLine(ins.from, ins.to, a); break;
+      case "label": drawLabel(ins.x, ins.y, ins.text, a.alpha * a.progress); break;
     }
+  } catch {
+    // ignore a single malformed instruction
   }
 }
 
@@ -133,12 +172,17 @@ function updateTtsButton() {
   els.ttsBtn.title = ttsEnabled ? "Speech on — click to mute" : "Speech off — click to unmute";
 }
 
-function speak(text) {
-  if (!ttsEnabled || !text || !window.speechSynthesis) return;
-  window.speechSynthesis.cancel(); // never overlap with a previous answer
+// Speak one step's sentence; call `onend` when it finishes (or can't be spoken),
+// so the walkthrough advances in time with the voice.
+function speakStep(text, onend) {
+  if (!ttsEnabled || !text || !window.speechSynthesis) return false;
+  window.speechSynthesis.cancel(); // never overlap with the previous sentence
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.rate = 1.05;
+  utterance.onend = onend;
+  utterance.onerror = onend; // don't stall the walkthrough if TTS hiccups
   window.speechSynthesis.speak(utterance);
+  return true;
 }
 
 function stopSpeaking() {
@@ -153,11 +197,119 @@ els.ttsBtn.addEventListener("click", () => {
 });
 updateTtsButton();
 
+// ---- Click-through overlay (Stage 4.4 prerequisite) -----------------------
+// The window is click-through by default so annotations never trap the cursor —
+// you keep using the app underneath. We flip it solid only while the pointer is
+// over an interactive panel (the control bar or the answer box), so its
+// buttons/input still work. enter/leave fire because main forwards mouse-move.
+function setInteractive(on) {
+  window.lazyAI.setIgnoreMouse(!on);
+}
+for (const panel of [els.bar, els.answer]) {
+  panel.addEventListener("mouseenter", () => setInteractive(true));
+  panel.addEventListener("mouseleave", () => setInteractive(false));
+}
+
+// ---- Narrated walkthrough (Live Teach) ------------------------------------
+// Plays the AI's steps in order: speak one sentence while ONLY that step's shape
+// animates in and pulses; when the sentence ends, clear it and reveal the next.
+// Nothing is shown upfront — each component appears as it's discussed.
+const ENTRANCE_MS = 650; // how long a shape takes to draw itself in
+let walk = null; // { steps, i, stepStart, raf, timer } | null
+
+// When TTS is muted/unavailable, estimate how long the sentence would take to
+// read so the visuals still pace themselves (~170 wpm), with sane bounds.
+function estimateDurationMs(text) {
+  const words = (text || "").trim().split(/\s+/).filter(Boolean).length;
+  return Math.min(9000, Math.max(2000, words * 350 + 600));
+}
+
+function renderStepFrame(now) {
+  if (!walk) return;
+  const step = walk.steps[walk.i];
+  const elapsed = now - walk.stepStart;
+  const progress = easeOut(Math.min(1, elapsed / ENTRANCE_MS));
+  const pulse = 0.5 + 0.5 * Math.sin(elapsed / 430); // gentle breathing highlight
+  clearCanvas();
+  for (const ins of step.draw || []) drawInstruction(ins, { progress, pulse, alpha: 1 });
+  walk.raf = requestAnimationFrame(renderStepFrame);
+}
+
+function playStep() {
+  if (!walk) return;
+  const step = walk.steps[walk.i];
+  walk.stepStart = performance.now();
+  setAnswer(step.say || "", ""); // synced caption under the bar
+
+  cancelAnimationFrame(walk.raf);
+  walk.raf = requestAnimationFrame(renderStepFrame);
+
+  // Guard against a stale utterance/timer advancing a newer walkthrough; the
+  // guard also makes the onend + safety-timer pair idempotent (whichever fires
+  // first advances; the second sees a changed index and no-ops).
+  const myWalk = walk;
+  const myIndex = walk.i;
+  const advance = () => {
+    if (walk === myWalk && walk.i === myIndex) nextStep();
+  };
+
+  const estimate = estimateDurationMs(step.say);
+  if (speakStep(step.say, advance)) {
+    // Speaking: advance on onend, but keep a safety net — some Windows voices
+    // drop the onend event, which would otherwise stall the walkthrough.
+    walk.timer = setTimeout(advance, estimate + 4000);
+  } else {
+    // Muted/unavailable: pace purely on the estimated reading time.
+    walk.timer = setTimeout(advance, estimate);
+  }
+}
+
+function nextStep() {
+  if (!walk) return;
+  clearTimeout(walk.timer);
+  walk.i += 1;
+  if (walk.i >= walk.steps.length) {
+    finishWalkthrough();
+    return;
+  }
+  playStep();
+}
+
+// After the last sentence: stop animating but leave that final shape on screen
+// (static, no pulse) and show the whole explanation as a resting recap.
+function finishWalkthrough() {
+  if (!walk) return;
+  cancelAnimationFrame(walk.raf);
+  clearTimeout(walk.timer);
+  const last = walk.steps[walk.steps.length - 1];
+  clearCanvas();
+  for (const ins of last.draw || []) drawInstruction(ins, STATIC);
+  const recap = walk.steps.map((s) => s.say).filter(Boolean).join(" ");
+  walk = null;
+  if (recap) setAnswer(recap, "");
+}
+
+function stopWalkthrough() {
+  if (walk) {
+    cancelAnimationFrame(walk.raf);
+    clearTimeout(walk.timer);
+    walk = null;
+  }
+  stopSpeaking();
+}
+
+function startWalkthrough(steps) {
+  stopWalkthrough();
+  clearCanvas();
+  walk = { steps, i: 0, stepStart: 0, raf: 0, timer: 0 };
+  playStep();
+}
+
 // ---- Flow -----------------------------------------------------------------
 async function ask() {
   const question = els.question.value.trim();
   els.askBtn.disabled = true;
-  stopSpeaking();
+  stopWalkthrough();
   clearCanvas();
   setAnswer("Looking at your screen…", "loading");
 
@@ -165,9 +317,11 @@ async function ask() {
   els.askBtn.disabled = false;
 
   if (result.ok) {
-    render(result.instructions);
-    setAnswer(result.explanation || "Done.", "");
-    speak(result.explanation || ""); // read the answer aloud
+    const steps =
+      result.steps && result.steps.length
+        ? result.steps
+        : [{ say: result.explanation || "Done.", draw: [] }];
+    startWalkthrough(steps);
   } else {
     setAnswer(result.error || "Something went wrong.", "err");
   }
@@ -255,12 +409,12 @@ els.question.addEventListener("keydown", (e) => {
   if (e.key === "Enter") ask();
 });
 els.closeBtn.addEventListener("click", () => {
-  stopSpeaking();
+  stopWalkthrough();
   window.lazyAI.hideOverlay();
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    stopSpeaking();
+    stopWalkthrough();
     window.lazyAI.hideOverlay();
   }
 });
@@ -269,7 +423,7 @@ document.addEventListener("keydown", (e) => {
 window.lazyAI.onOverlayShow((data) => {
   imageWidth = data?.imageWidth || window.innerWidth;
   imageHeight = data?.imageHeight || window.innerHeight;
-  stopSpeaking();
+  stopWalkthrough();
   resizeCanvas();
   clearCanvas();
   setAnswer("", "");

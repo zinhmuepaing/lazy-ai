@@ -163,6 +163,16 @@ ipcMain.handle("screen-ask", async (_event, question) => {
 
 ipcMain.on("hide-overlay", () => overlayWindow?.hide());
 
+// Live Teach prerequisite: let the overlay be click-through so annotations don't
+// trap the cursor — the renderer flips this off only while the pointer is over
+// the control bar. `forward: true` keeps mouse-move events flowing so the
+// renderer's hover detection still fires while clicks pass through.
+ipcMain.on("overlay-set-ignore-mouse", (_event, ignore) => {
+  if (!overlayWindow) return;
+  if (ignore) overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+  else overlayWindow.setIgnoreMouseEvents(false);
+});
+
 // Screen Teacher voice input: transcribe mic audio locally via Whisper, then
 // clean up likely speech-to-text errors with a fast model before using it.
 ipcMain.handle("transcribe", async (_event, audio) => {
@@ -472,7 +482,10 @@ async function showScreenTeacher() {
   if (!overlayWindow) createOverlayWindow();
   overlayWindow.setBounds(screen.getPrimaryDisplay().bounds);
   overlayWindow.show();
-  overlayWindow.focus();
+  overlayWindow.focus(); // keyboard focus (typing/Esc) is independent of mouse pass-through
+  // Start click-through: annotations never trap the cursor; the bar re-enables
+  // itself on hover. Keyboard still reaches the focused window for typing/Esc.
+  overlayWindow.setIgnoreMouseEvents(true, { forward: true });
   overlayWindow.webContents.send("overlay-show", {
     imageWidth: lastScreenshot.width,
     imageHeight: lastScreenshot.height,
