@@ -20,6 +20,10 @@ const els = {
 let imageWidth = window.innerWidth;
 let imageHeight = window.innerHeight;
 
+// "teach" = Screen Teacher (explain/draw); "control" = Screen Control (act).
+let overlayMode = "teach";
+const barTitle = document.querySelector(".bar-title");
+
 function resizeCanvas() {
   canvas.width = imageWidth;
   canvas.height = imageHeight;
@@ -345,6 +349,7 @@ window.lazyAI.onPlaySteps((data) => {
   els.askBtn.disabled = false;
   const steps = data.steps && data.steps.length ? data.steps : [{ say: "Done.", draw: [] }];
   startWalkthrough(steps, data.done !== false, data.accumulate === true); // undefined → done, replace
+  if (overlayMode === "control") els.askBtn.textContent = "Do it"; // keep control-mode label
 });
 
 // Loading / error / hint captions from the loop.
@@ -364,11 +369,13 @@ window.lazyAI.onOverlayClear(() => {
 // guiding (watching the screen for the user to act) until the task is done.
 function ask() {
   els.askBtn.disabled = true;
-  els.askBtn.textContent = "Ask";
+  els.askBtn.textContent = overlayMode === "control" ? "Do it" : "Ask";
   stopWalkthrough();
   clearCanvas();
   setAnswer("Looking at your screen…", "loading");
-  window.lazyAI.startGuide(els.question.value.trim());
+  const text = els.question.value.trim();
+  if (overlayMode === "control") window.lazyAI.startControl(text);
+  else window.lazyAI.startGuide(text);
 }
 
 // ---- Voice input (push-to-talk, local Whisper) ----------------------------
@@ -472,10 +479,18 @@ document.addEventListener("keydown", (e) => {
 window.lazyAI.onOverlayShow((data) => {
   imageWidth = data?.imageWidth || window.innerWidth;
   imageHeight = data?.imageHeight || window.innerHeight;
+  overlayMode = data?.mode === "control" ? "control" : "teach";
   stopWalkthrough();
   resizeCanvas();
   clearCanvas();
   setAnswer("", "");
+  // Reflect the mode in the bar so it's obvious whether it will ACT or EXPLAIN.
+  if (barTitle) barTitle.innerHTML = overlayMode === "control" ? "Screen<b>Control</b>" : "Screen<b>Teacher</b>";
+  els.askBtn.textContent = overlayMode === "control" ? "Do it" : "Ask";
+  els.question.placeholder =
+    overlayMode === "control"
+      ? "tell me what to do… e.g. “click the Send button”, “open Notepad” (Enter, Esc to cancel)"
+      : "ask about what's on your screen… (Enter to ask, Esc to close)";
   els.question.value = "";
   els.question.focus();
 });

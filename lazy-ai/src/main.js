@@ -32,6 +32,7 @@ const { startLocalServer } = require("./local-server");
 const winAutomation = require("./win-automation");
 const settingsStore = require("./settings-store");
 const screenTeacher = require("./screen-teacher");
+const screenControl = require("./screen-control");
 const voiceEngine = require("./voice-engine");
 
 // Screen Teacher summon hotkeys, in preference order (separate from the polish
@@ -40,6 +41,13 @@ const SCREEN_TEACHER_CANDIDATES = [
   "CommandOrControl+Shift+S",
   "CommandOrControl+Alt+S",
   "CommandOrControl+Shift+G",
+];
+
+// Screen Control summon hotkeys (Stage 5) — voice/text command → the app acts.
+const SCREEN_CONTROL_CANDIDATES = [
+  "CommandOrControl+Shift+A",
+  "CommandOrControl+Alt+A",
+  "CommandOrControl+Shift+D",
 ];
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -70,6 +78,13 @@ let overlayWindow = null;
 let tray = null;
 let activeHotkey = null; // the summon accelerator we actually managed to register
 let activeScreenHotkey = null; // the Screen Teacher accelerator we registered
+let activeControlHotkey = null; // the Screen Control accelerator we registered
+let overlayMode = "teach"; // "teach" (draw/explain) | "control" (act)
+let controlTimer = null; // pending action-execute timer (cancelable on dismiss)
+let controlActive = false; // a multi-step Screen Control command is running
+let controlGoal = ""; // the user's command/goal for the control loop
+let controlHistory = []; // Anthropic messages (text-only) across control turns
+let controlTurnCount = 0;
 let sourceHwnd = null; // window the selection came from, to paste back into
 let lastScreenshot = null; // { base64, mediaType, width, height } for Screen Teacher
 let activeDisplay = null; // the display the current Screen Teacher session is bound to
@@ -90,6 +105,18 @@ let watchDirty = false; // true once the screen has started changing (user actin
 // each turn so a change takes effect on the next capture/ask.
 function activeScreenTeacherModel() {
   return settingsStore.getPublicSettings().screenTeacherModel || screenTeacher.DEFAULT_SCREEN_TEACHER_MODEL;
+}
+
+// Screen Control plans with a fast/cheap model (Sonnet 4.6) — separate from the
+// Teacher picker. Captures for control MUST be capped to this model's vision
+// limit, or its coordinates drift.
+function controlModel() {
+  return screenControl.DEFAULT_CONTROL_MODEL;
+}
+
+// The screenshot long-edge cap for the model that will consume the capture.
+function maxEdgeForModel(model) {
+  return screenTeacher.maxEdgeFor(model);
 }
 
 const GUIDE_MAX_TURNS = 14; // safety cap so a misbehaving loop can't run forever
@@ -190,8 +217,12 @@ ipcMain.on("guide-continue", () => {
   if (guideActive) runGuideTurn({ useExistingShot: false });
 });
 
+// Screen Control (Stage 5): the renderer hands us a command/goal to carry out.
+ipcMain.on("start-control", (_event, command) => startControlGoal(command));
+
 ipcMain.on("hide-overlay", () => {
   stopGuide();
+  stopControl();
   overlayWindow?.hide();
 });
 
@@ -333,10 +364,12 @@ function applyTrayMenu() {
   const hotkeyLabel = activeHotkey ? prettyHotkey(activeHotkey) : "no hotkey — set one in Settings";
   tray.setToolTip(`Lazy AI — press ${hotkeyLabel}`);
   const screenLabel = activeScreenHotkey ? prettyHotkey(activeScreenHotkey) : "no hotkey";
+  const controlLabel = activeControlHotkey ? prettyHotkey(activeControlHotkey) : "no hotkey";
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: `Open Lazy AI  (${hotkeyLabel})`, click: () => showPopup() },
       { label: `Ask about my screen  (${screenLabel})`, click: () => showScreenTeacher() },
+      { label: `Control my screen  (${controlLabel})`, click: () => showScreenControl() },
       { label: "Settings…", click: openSettings },
       { type: "separator" },
       {
@@ -418,6 +451,20 @@ function registerScreenTeacherHotkey() {
   }
 }
 
+function registerControlHotkey() {
+  for (const candidate of SCREEN_CONTROL_CANDIDATES) {
+    if (globalShortcut.register(candidate, showScreenControl)) {
+      activeControlHotkey = candidate;
+      break;
+    }
+  }
+  if (activeControlHotkey) {
+    console.log(`[lazy-ai] Screen Control hotkey: ${prettyHotkey(activeControlHotkey)}`);
+  } else {
+    console.error(`[lazy-ai] Could not register any Screen Control hotkey — all candidates are in use.`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Screen Teacher (Stage 4): screenshot → ask Claude → draw answer on a
 // transparent click-safe overlay.
@@ -430,9 +477,12 @@ function currentDisplay() {
   return activeDisplay || screen.getPrimaryDisplay();
 }
 
-// Capture the active display at full physical resolution so the AI's
-// pixel coordinates line up with what's on screen.
-async function captureScreen() {
+// Capture the active display. `maxLongEdge` MUST be the vision limit of the model
+// that will actually process this image — if the image is larger than the model's
+// limit, the API silently downscales it and the model's coordinates no longer
+// match the dimensions we report, so clicks/annotations drift. (This is why
+// Screen Control on Sonnet/1568 drifted while it was capped to Opus/2560.)
+async function captureScreen(maxLongEdge) {
   const display = currentDisplay();
   const { width, height } = display.size; // CSS pixels
   const scaleFactor = display.scaleFactor || 1;
@@ -450,10 +500,9 @@ async function captureScreen() {
   let image = source.thumbnail;
   let size = image.getSize();
 
-  // Cap the long edge to the active model's high-res vision limit, so the model
-  // isn't silently downscaling the image (which throws its coordinates off).
+  // Cap the long edge to the consuming model's limit so the API doesn't re-downscale.
   // The overlay sizes its canvas to these dimensions, so coordinates stay 1:1.
-  const MAX_LONG_EDGE = screenTeacher.maxEdgeFor(activeScreenTeacherModel());
+  const MAX_LONG_EDGE = maxLongEdge || screenTeacher.maxEdgeFor(activeScreenTeacherModel());
   const longEdge = Math.max(size.width, size.height);
   if (longEdge > MAX_LONG_EDGE) {
     const scale = MAX_LONG_EDGE / longEdge;
@@ -502,30 +551,38 @@ function createOverlayWindow() {
     if (!app.isQuitting) {
       event.preventDefault();
       stopGuide();
+      stopControl();
       overlayWindow.hide();
     }
   });
 }
 
-async function showScreenTeacher() {
+// Summon the transparent overlay in a given mode: "teach" (draw/explain) or
+// "control" (act on a command). Both share the capture + overlay + voice/bar.
+async function summonOverlay(mode) {
   // Toggle off if already up.
   if (overlayWindow && overlayWindow.isVisible()) {
     stopGuide();
+    stopControl();
     overlayWindow.hide();
     return;
   }
   stopGuide(); // start each session clean — no leftover watch loop
-  // Bind this session to the display under the cursor, so Screen Teacher works on
-  // whichever monitor the user is actually looking at (capture + overlay + watch
-  // all use this display until dismissed).
+  stopControl();
+  overlayMode = mode;
+  // Bind this session to the display under the cursor, so it works on whichever
+  // monitor the user is looking at (capture + overlay + watch all use it).
   activeDisplay = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
   // Get our own windows out of the shot before capturing.
   if (mainWindow && mainWindow.isVisible()) mainWindow.hide();
   if (overlayWindow && overlayWindow.isVisible()) overlayWindow.hide();
   await delay(150);
 
+  // Cap the capture to the model that will process it (control → Sonnet/1568,
+  // teach → the Settings model) so its coordinates map 1:1.
+  const captureModel = mode === "control" ? controlModel() : activeScreenTeacherModel();
   try {
-    lastScreenshot = await captureScreen();
+    lastScreenshot = await captureScreen(maxEdgeForModel(captureModel));
   } catch (err) {
     console.error(`[lazy-ai] Screenshot failed: ${err.message}`);
     return;
@@ -539,9 +596,18 @@ async function showScreenTeacher() {
   // itself on hover. Keyboard still reaches the focused window for typing/Esc.
   overlayWindow.setIgnoreMouseEvents(true, { forward: true });
   overlayWindow.webContents.send("overlay-show", {
+    mode,
     imageWidth: lastScreenshot.width,
     imageHeight: lastScreenshot.height,
   });
+}
+
+function showScreenTeacher() {
+  return summonOverlay("teach");
+}
+
+function showScreenControl() {
+  return summonOverlay("control");
 }
 
 // ---------------------------------------------------------------------------
@@ -591,6 +657,33 @@ function stopWatching() {
 function stopGuide() {
   guideActive = false;
   stopWatching();
+}
+
+// Stop the Screen Control loop and cancel any action waiting in its preview
+// window (so dismissing the overlay aborts mid-sequence).
+function stopControl() {
+  controlActive = false;
+  if (controlTimer) clearTimeout(controlTimer);
+  controlTimer = null;
+}
+
+// Map a normalized fraction of the active display (fx, fy in 0–1) to a PHYSICAL
+// screen pixel for the DPI-aware control script. The model returns PERCENTAGES
+// (resolution-independent — no dependence on the screenshot's pixel size or the
+// model's image cap), which we convert to a fraction here. Two delegated stages:
+//   1) fraction → DIP point inside the display's bounds (DIP).
+//   2) DIP → physical via Electron's screen.dipToScreenPoint, which the OS makes
+//      accurate across per-monitor DPI (125%/150%) and multi-monitor layouts.
+function fractionToPhysical(fx, fy) {
+  const d = currentDisplay();
+  const cfx = Math.min(1, Math.max(0, fx));
+  const cfy = Math.min(1, Math.max(0, fy));
+  const dipPoint = {
+    x: Math.round(d.bounds.x + cfx * d.bounds.width),
+    y: Math.round(d.bounds.y + cfy * d.bounds.height),
+  };
+  const phys = screen.dipToScreenPoint(dipPoint);
+  return { x: Math.round(phys.x), y: Math.round(phys.y) };
 }
 
 async function startGuide(question) {
@@ -671,7 +764,7 @@ async function runGuideTurn({ useExistingShot }) {
       shot = lastScreenshot;
     } else {
       overlayWindow.webContents.send("overlay-clear"); // wipe the old pointer while we think
-      shot = await captureScreen();
+      shot = await captureScreen(maxEdgeForModel(activeScreenTeacherModel()));
       lastScreenshot = shot;
     }
   } catch (err) {
@@ -732,6 +825,184 @@ async function runGuideTurn({ useExistingShot }) {
 }
 
 // ---------------------------------------------------------------------------
+// Screen Control (Stage 5.3, keyboard-first fast path): each turn we capture →
+// ask for a PLAN (a batch of mostly-keyboard actions) → preview it → run the
+// whole batch in ONE PowerShell process → if not done, wait for the screen to
+// settle, re-capture and plan again. Most tasks finish in one model call + one
+// PowerShell run; vision-clicks are the fallback within the same plan.
+// ---------------------------------------------------------------------------
+const CONTROL_PREVIEW_MS = 400; // brief, cancelable preview before a batch runs
+const CONTROL_MAX_TURNS = 8; // safety cap on re-plans so a loop can't run forever
+const SPATIAL_TYPES = ["click", "doubleclick", "rightclick", "scroll"];
+
+async function startControlGoal(command) {
+  if (!overlayWindow || !overlayWindow.isVisible()) return;
+  stopControl();
+  controlActive = true;
+  controlGoal = (command || "").trim();
+  controlHistory = [];
+  controlTurnCount = 0;
+  await controlTurn({ useExistingShot: true });
+}
+
+// Poll until the screen stops changing after we acted, so the UI has finished
+// updating before we decide the next step. Bounded by maxMs.
+async function waitForScreenSettle({ maxMs = 2000, interval = 250 } = {}) {
+  const start = Date.now();
+  let prev = await captureScreenThumbnail().catch(() => null);
+  await delay(interval);
+  while (controlActive && Date.now() - start < maxMs) {
+    const cur = await captureScreenThumbnail().catch(() => null);
+    if (cur && prev && changedFraction(cur, prev) < 0.02) return; // settled enough
+    prev = cur;
+    await delay(interval);
+  }
+}
+
+// Turn the model's plan into a fully-resolved batch the PowerShell executor can
+// run directly: click/scroll coords → physical pixels, key combos → SendKeys.
+function resolvePlan(actions) {
+  const resolved = [];
+  for (const a of actions) {
+    if (a.type === "launch") resolved.push({ type: "launch", app: a.app });
+    else if (a.type === "press") resolved.push({ type: "press", send: winAutomation.composeSendKeys(a.keys) });
+    else if (a.type === "text") resolved.push({ type: "text", text: a.text });
+    else if (a.type === "wait") resolved.push({ type: "wait", ms: a.ms });
+    else if (a.type === "scroll") {
+      const p = fractionToPhysical(a.xPct / 100, a.yPct / 100);
+      resolved.push({ type: "scroll", x: p.x, y: p.y, amount: a.amount });
+    } else if (a.type === "click" || a.type === "doubleclick" || a.type === "rightclick") {
+      const p = fractionToPhysical(a.xPct / 100, a.yPct / 100);
+      resolved.push({ type: a.type, x: p.x, y: p.y });
+    }
+  }
+  return resolved;
+}
+
+// Budget a timeout that covers the plan's own waits plus per-action overhead.
+function planTimeoutMs(actions) {
+  const waits = actions.reduce((sum, a) => sum + (a.type === "wait" ? a.ms : 0), 0);
+  return Math.min(45000, 8000 + waits + actions.length * 500);
+}
+
+async function controlTurn({ useExistingShot }) {
+  if (!controlActive || !overlayWindow) return;
+
+  if (controlTurnCount >= CONTROL_MAX_TURNS) {
+    sendOverlayStatus("Stopped after several steps — ask again to continue.", "");
+    stopControl();
+    return;
+  }
+
+  sendOverlayStatus("Planning…", "loading");
+  let shot;
+  try {
+    shot = useExistingShot && lastScreenshot ? lastScreenshot : await captureScreen(maxEdgeForModel(controlModel()));
+    lastScreenshot = shot;
+  } catch (err) {
+    sendOverlayStatus("Couldn't capture the screen — try again.", "err");
+    stopControl();
+    return;
+  }
+
+  const turnText =
+    controlTurnCount === 0
+      ? null // first turn: the goal (command) is the prompt
+      : `You have performed the previous actions; here is the updated screen. Continue toward the goal: "${controlGoal}". Return the next batch of actions, or set "done":true with "actions":[] if the goal is now complete.`;
+
+  let res;
+  try {
+    res = await screenControl.planActions({
+      imageBase64: shot.base64,
+      mediaType: shot.mediaType,
+      command: controlGoal,
+      imageWidth: shot.width,
+      imageHeight: shot.height,
+      model: controlModel(), // must match the capture cap above
+      history: controlHistory,
+      turnText,
+    });
+  } catch (err) {
+    res = { ok: false, error: String(err.message || err) };
+  }
+  if (!controlActive) return; // dismissed mid-call
+
+  if (!res.ok) {
+    sendOverlayStatus(res.error || "Something went wrong.", "err");
+    stopControl();
+    return;
+  }
+
+  const plan = res.plan;
+  controlHistory.push({ role: "user", content: [{ type: "text", text: (turnText || `Goal: ${controlGoal}`) + " [screenshot shown]" }] });
+  controlHistory.push({ role: "assistant", content: [{ type: "text", text: res.raw }] });
+  controlTurnCount += 1;
+
+  // No actions: goal already complete (done) or stuck (explain + stay open).
+  if (!plan.actions.length) {
+    overlayWindow.webContents.send("overlay-play-steps", {
+      steps: [{ say: plan.say || "Done.", draw: [] }],
+      done: true,
+      accumulate: false,
+      imageWidth: shot.width,
+      imageHeight: shot.height,
+    });
+    if (plan.done) finishControl();
+    else stopControl(); // couldn't proceed — leave the overlay up for another command
+    return;
+  }
+
+  // Preview: speak the plan's summary and mark any click/scroll targets, then run
+  // the whole batch after a short, cancelable delay.
+  const draw = plan.actions
+    .filter((a) => SPATIAL_TYPES.includes(a.type))
+    .map((a) => ({
+      shape: "circle",
+      x: Math.round((a.xPct / 100) * shot.width), // % → canvas pixels (canvas = screenshot size)
+      y: Math.round((a.yPct / 100) * shot.height),
+      r: Math.max(26, Math.round(shot.width / 60)),
+      label: a.type,
+    }));
+  overlayWindow.webContents.send("overlay-play-steps", {
+    steps: [{ say: plan.say || "Working…", draw }],
+    done: true,
+    accumulate: false,
+    imageWidth: shot.width,
+    imageHeight: shot.height,
+  });
+
+  const resolved = resolvePlan(plan.actions);
+  controlTimer = setTimeout(async () => {
+    controlTimer = null;
+    if (!controlActive) return;
+    try {
+      await winAutomation.performPlan(resolved, planTimeoutMs(plan.actions));
+    } catch (err) {
+      sendOverlayStatus(`Action failed: ${String(err.message || err)}`, "err");
+      stopControl();
+      return;
+    }
+    if (!controlActive) return;
+    if (plan.done) {
+      finishControl(); // the batch completed the goal
+      return;
+    }
+    await waitForScreenSettle(); // let the batch's effects render before re-planning
+    if (!controlActive) return;
+    controlTurn({ useExistingShot: false });
+  }, CONTROL_PREVIEW_MS);
+}
+
+// Goal complete: stop the loop and get the overlay out of the way (after a beat
+// so any spoken confirmation finishes).
+function finishControl() {
+  stopControl();
+  setTimeout(() => {
+    if (overlayWindow && !controlActive) overlayWindow.hide();
+  }, 1600);
+}
+
+// ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
 function init() {
@@ -755,6 +1026,7 @@ function init() {
   }
 
   registerScreenTeacherHotkey();
+  registerControlHotkey();
   createTray();
 }
 

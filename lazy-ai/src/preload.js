@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld("lazyAI", {
   startGuide: (question) => ipcRenderer.send("start-guide", question),
   // Manually advance the guide ("I've done that step, continue").
   guideContinue: () => ipcRenderer.send("guide-continue"),
+  // Screen Control (Stage 5): hand a command to main, which plans + performs it.
+  startControl: (command) => ipcRenderer.send("start-control", command),
   // Main pushes a walkthrough to play: { steps, done, imageWidth, imageHeight }.
   onPlaySteps: (callback) => ipcRenderer.on("overlay-play-steps", (_event, data) => callback(data || {})),
   // Status/caption updates from the loop (loading / error / hints).
