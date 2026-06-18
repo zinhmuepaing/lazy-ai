@@ -26,8 +26,16 @@ contextBridge.exposeInMainWorld("lazyAI", {
   // Screen Teacher overlay (Stage 4):
   // Fires when the overlay is summoned; data carries the screenshot pixel size.
   onOverlayShow: (callback) => ipcRenderer.on("overlay-show", (_event, data) => callback(data || {})),
-  // Ask Claude about the screenshot main captured; returns { ok, instructions, explanation }.
-  askScreen: (question) => ipcRenderer.invoke("screen-ask", question),
+  // Start the interactive guide loop for the user's goal (main drives capture/asks).
+  startGuide: (question) => ipcRenderer.send("start-guide", question),
+  // Manually advance the guide ("I've done that step, continue").
+  guideContinue: () => ipcRenderer.send("guide-continue"),
+  // Main pushes a walkthrough to play: { steps, done, imageWidth, imageHeight }.
+  onPlaySteps: (callback) => ipcRenderer.on("overlay-play-steps", (_event, data) => callback(data || {})),
+  // Status/caption updates from the loop (loading / error / hints).
+  onGuideStatus: (callback) => ipcRenderer.on("overlay-status", (_event, data) => callback(data || {})),
+  // Main asks us to wipe the canvas (e.g. just before re-capturing a clean shot).
+  onOverlayClear: (callback) => ipcRenderer.on("overlay-clear", () => callback()),
   hideOverlay: () => ipcRenderer.send("hide-overlay"),
   // Toggle the overlay's click-through: pass true to let clicks fall through to
   // the app underneath (annotations don't trap the cursor); false while the

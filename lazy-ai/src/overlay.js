@@ -215,7 +215,8 @@ for (const panel of [els.bar, els.answer]) {
 // animates in and pulses; when the sentence ends, clear it and reveal the next.
 // Nothing is shown upfront — each component appears as it's discussed.
 const ENTRANCE_MS = 650; // how long a shape takes to draw itself in
-let walk = null; // { steps, i, stepStart, raf, timer } | null
+let walk = null; // { steps, i, stepStart, raf, timer, done } | null
+let awaitingAction = false; // true while a guide step is up, waiting for the user to act
 
 // When TTS is muted/unavailable, estimate how long the sentence would take to
 // read so the visuals still pace themselves (~170 wpm), with sane bounds.
@@ -276,55 +277,96 @@ function nextStep() {
 }
 
 // After the last sentence: stop animating but leave that final shape on screen
-// (static, no pulse) and show the whole explanation as a resting recap.
+// (static, no pulse). If the task is complete we show a recap; if not, we leave
+// the cue up and tell main we've settled so it can watch for the user's action.
 function finishWalkthrough() {
   if (!walk) return;
   cancelAnimationFrame(walk.raf);
   clearTimeout(walk.timer);
-  const last = walk.steps[walk.steps.length - 1];
+  const steps = walk.steps;
+  const done = walk.done;
+  const last = steps[steps.length - 1];
   clearCanvas();
   for (const ins of last.draw || []) drawInstruction(ins, STATIC);
-  const recap = walk.steps.map((s) => s.say).filter(Boolean).join(" ");
+  if (done) {
+    const recap = steps.map((s) => s.say).filter(Boolean).join(" ");
+    setAnswer(recap, "");
+  } else {
+    // mid-task: leave the instruction + pointer up. Main is already watching for
+    // the user's action (started in parallel when this step began).
+    setAnswer(last.say || "", "");
+  }
   walk = null;
-  if (recap) setAnswer(recap, "");
 }
 
+// Abort the current walkthrough without reporting a natural finish.
 function stopWalkthrough() {
   if (walk) {
     cancelAnimationFrame(walk.raf);
     clearTimeout(walk.timer);
     walk = null;
   }
+  awaitingAction = false;
   stopSpeaking();
 }
 
-function startWalkthrough(steps) {
+function startWalkthrough(steps, done = true) {
   stopWalkthrough();
+  // While guiding (done:false) the bar's button means "I've done it, continue"
+  // — a manual fallback in case auto-detection ever misses the action.
+  awaitingAction = !done;
+  els.askBtn.textContent = done ? "Ask" : "Next ▶";
   clearCanvas();
-  walk = { steps, i: 0, stepStart: 0, raf: 0, timer: 0 };
+  walk = { steps, i: 0, stepStart: 0, raf: 0, timer: 0, done };
   playStep();
 }
 
+// "I've done that step" — advance the guide manually (fallback for when the
+// screen-change watcher misses it, or the user acted mid-narration).
+function manualContinue() {
+  awaitingAction = false;
+  stopWalkthrough();
+  els.askBtn.textContent = "Ask";
+  clearCanvas();
+  setAnswer("Looking at your screen…", "loading");
+  window.lazyAI.guideContinue();
+}
+
+// ---- Guide loop wiring (main drives capture/ask; we play + report back) ----
+// Main pushes each turn's walkthrough here.
+window.lazyAI.onPlaySteps((data) => {
+  if (data.imageWidth && data.imageHeight && (data.imageWidth !== imageWidth || data.imageHeight !== imageHeight)) {
+    imageWidth = data.imageWidth;
+    imageHeight = data.imageHeight;
+    resizeCanvas();
+  }
+  els.askBtn.disabled = false;
+  const steps = data.steps && data.steps.length ? data.steps : [{ say: "Done.", draw: [] }];
+  startWalkthrough(steps, data.done !== false); // undefined → treat as done
+});
+
+// Loading / error / hint captions from the loop.
+window.lazyAI.onGuideStatus((data) => {
+  setAnswer(data.text || "", data.kind || "");
+  if (data.kind === "err") els.askBtn.disabled = false;
+});
+
+// Main is about to re-capture a clean screenshot — wipe our annotation first.
+window.lazyAI.onOverlayClear(() => {
+  stopWalkthrough();
+  clearCanvas();
+});
+
 // ---- Flow -----------------------------------------------------------------
-async function ask() {
-  const question = els.question.value.trim();
+// Hand the goal to main, which captures, asks, plays the step here, and keeps
+// guiding (watching the screen for the user to act) until the task is done.
+function ask() {
   els.askBtn.disabled = true;
+  els.askBtn.textContent = "Ask";
   stopWalkthrough();
   clearCanvas();
   setAnswer("Looking at your screen…", "loading");
-
-  const result = await window.lazyAI.askScreen(question);
-  els.askBtn.disabled = false;
-
-  if (result.ok) {
-    const steps =
-      result.steps && result.steps.length
-        ? result.steps
-        : [{ say: result.explanation || "Done.", draw: [] }];
-    startWalkthrough(steps);
-  } else {
-    setAnswer(result.error || "Something went wrong.", "err");
-  }
+  window.lazyAI.startGuide(els.question.value.trim());
 }
 
 // ---- Voice input (push-to-talk, local Whisper) ----------------------------
@@ -404,9 +446,14 @@ els.micBtn.addEventListener("click", () => {
   else startRecording();
 });
 
-els.askBtn.addEventListener("click", ask);
+// While a guide step is waiting, an empty Ask/Enter means "I've done it, continue".
+function askOrContinue() {
+  if (awaitingAction && !els.question.value.trim()) manualContinue();
+  else ask();
+}
+els.askBtn.addEventListener("click", askOrContinue);
 els.question.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") ask();
+  if (e.key === "Enter") askOrContinue();
 });
 els.closeBtn.addEventListener("click", () => {
   stopWalkthrough();

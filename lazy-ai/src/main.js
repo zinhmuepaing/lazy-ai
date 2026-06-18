@@ -73,6 +73,26 @@ let activeScreenHotkey = null; // the Screen Teacher accelerator we registered
 let sourceHwnd = null; // window the selection came from, to paste back into
 let lastScreenshot = null; // { base64, mediaType, width, height } for Screen Teacher
 
+// ---- Interactive guide loop (Live Teach) ----------------------------------
+// When the user asks a multi-step "how do I…" question, we annotate the next
+// action, watch the screen for them to perform it, then re-capture and guide the
+// next step — until the model reports the task is done.
+let guideActive = false;
+let guideGoal = "";
+let guideHistory = []; // Anthropic messages (text-only) carried across turns
+let guideTurn = 0;
+let watchTimer = null; // setTimeout handle for the screen-change poll
+let watchPrev = null; // previous poll thumbnail (RGBA Buffer) for diffing
+let watchDirty = false; // true once the screen has started changing (user acting)
+
+const GUIDE_MAX_TURNS = 14; // safety cap so a misbehaving loop can't run forever
+const WATCH_INTERVAL_MS = 450; // how often we poll the screen while watching (snappy detection)
+// We detect a LOCALIZED change (a dropdown, a new panel) rather than an average
+// change across the whole frame — averaging buries a small UI change below the
+// noise floor. So we count the fraction of pixels that changed substantially.
+const WATCH_PIXEL_DELTA = 40; // per-pixel change (|ΔR|+|ΔG|+|ΔB|, max 765) to count as "changed"
+const WATCH_CHANGE_FRACTION = 0.012; // fraction of sampled pixels that must change = "user did something"
+
 // ---------------------------------------------------------------------------
 // Single-instance lock — a global hotkey + tray must own exactly one process.
 // A second launch just summons the existing one instead of starting a rival.
@@ -149,19 +169,19 @@ ipcMain.handle("polish", async (_event, payload) => polish(payload));
 // Renderer asks to dismiss the popup (Esc key or the ✕ button).
 ipcMain.on("hide-window", () => mainWindow?.hide());
 
-// Screen Teacher: answer a question about the screenshot main captured.
-ipcMain.handle("screen-ask", async (_event, question) => {
-  if (!lastScreenshot) return { ok: false, error: "No screenshot captured. Press the Screen Teacher hotkey again." };
-  return screenTeacher.askAboutScreen({
-    imageBase64: lastScreenshot.base64,
-    mediaType: lastScreenshot.mediaType,
-    question,
-    imageWidth: lastScreenshot.width,
-    imageHeight: lastScreenshot.height,
-  });
+// Screen Teacher: the renderer hands us the user's goal; we drive the guide loop.
+ipcMain.on("start-guide", (_event, question) => startGuide(question));
+
+// Manual fallback: the user says "I've done it, continue" (e.g. if auto-detect
+// missed the change, or they acted while it was still narrating).
+ipcMain.on("guide-continue", () => {
+  if (guideActive) runGuideTurn({ useExistingShot: false });
 });
 
-ipcMain.on("hide-overlay", () => overlayWindow?.hide());
+ipcMain.on("hide-overlay", () => {
+  stopGuide();
+  overlayWindow?.hide();
+});
 
 // Live Teach prerequisite: let the overlay be click-through so annotations don't
 // trap the cursor — the renderer flips this off only while the pointer is over
@@ -452,10 +472,17 @@ function createOverlayWindow() {
     },
   });
   overlayWindow.setAlwaysOnTop(true, "screen-saver");
+  // Exclude our overlay from screen capture (Win10 2004+: WDA_EXCLUDEFROMCAPTURE).
+  // The user still sees the annotations, but desktopCapturer does NOT — so the
+  // screenshots we send Claude are pristine (no bar/annotation), AND we can watch
+  // for the user's action DURING narration without our own animation/pulse being
+  // mistaken for a screen change.
+  overlayWindow.setContentProtection(true);
   overlayWindow.loadFile(path.join(__dirname, "overlay.html"));
   overlayWindow.on("close", (event) => {
     if (!app.isQuitting) {
       event.preventDefault();
+      stopGuide();
       overlayWindow.hide();
     }
   });
@@ -464,9 +491,11 @@ function createOverlayWindow() {
 async function showScreenTeacher() {
   // Toggle off if already up.
   if (overlayWindow && overlayWindow.isVisible()) {
+    stopGuide();
     overlayWindow.hide();
     return;
   }
+  stopGuide(); // start each session clean — no leftover watch loop
   // Get our own windows out of the shot before capturing.
   if (mainWindow && mainWindow.isVisible()) mainWindow.hide();
   if (overlayWindow && overlayWindow.isVisible()) overlayWindow.hide();
@@ -490,6 +519,191 @@ async function showScreenTeacher() {
     imageWidth: lastScreenshot.width,
     imageHeight: lastScreenshot.height,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Interactive guide loop: annotate the next action → watch the screen for the
+// user to perform it → re-capture and guide the next step → … until done.
+// ---------------------------------------------------------------------------
+function sendOverlayStatus(text, kind = "") {
+  overlayWindow?.webContents.send("overlay-status", { text, kind });
+}
+
+// A small thumbnail of the screen, as a raw RGBA buffer, for cheap change
+// detection. The overlay's annotation is static while we watch, so it cancels
+// out when we diff consecutive frames — only the user's actions show up.
+async function captureScreenThumbnail() {
+  const display = screen.getPrimaryDisplay();
+  const sources = await desktopCapturer.getSources({
+    types: ["screen"],
+    thumbnailSize: { width: 200, height: 120 },
+  });
+  const source = sources.find((s) => String(s.display_id) === String(display.id)) || sources[0];
+  return source ? source.thumbnail.toBitmap() : null;
+}
+
+// Fraction (0..1) of sampled pixels that changed substantially between two
+// equal-size RGBA buffers (sampling every 4th pixel for speed). This catches a
+// localized change — a dropdown, a panel — that a whole-frame average would miss,
+// while ignoring faint compression/antialiasing noise. 1 = "different/unknown".
+function changedFraction(a, b) {
+  if (!a || !b || a.length === 0 || a.length !== b.length) return 1;
+  let changed = 0;
+  let total = 0;
+  for (let i = 0; i + 2 < a.length; i += 16) {
+    const d = Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]);
+    if (d > WATCH_PIXEL_DELTA) changed++;
+    total++;
+  }
+  return total ? changed / total : 1;
+}
+
+function stopWatching() {
+  if (watchTimer) clearTimeout(watchTimer);
+  watchTimer = null;
+  watchPrev = null;
+  watchDirty = false;
+}
+
+function stopGuide() {
+  guideActive = false;
+  stopWatching();
+}
+
+async function startGuide(question) {
+  if (!overlayWindow || !overlayWindow.isVisible()) return;
+  stopWatching();
+  guideActive = true;
+  guideGoal = (question || "").trim();
+  guideHistory = [];
+  guideTurn = 0;
+  await runGuideTurn({ useExistingShot: true });
+}
+
+// Poll the screen; once it changes (user acting) and then settles, guide the
+// next step. Runs in parallel with narration. The baseline is grabbed right now
+// (just after the clean capture, before the user has acted) so even a near-
+// instant click is detected against the pre-action state.
+async function startWatching() {
+  stopWatching();
+  try {
+    watchPrev = await captureScreenThumbnail();
+  } catch {
+    watchPrev = null;
+  }
+  watchDirty = false;
+  if (guideActive && !watchTimer) scheduleWatchTick();
+}
+
+function scheduleWatchTick() {
+  watchTimer = setTimeout(watchTick, WATCH_INTERVAL_MS);
+}
+
+async function watchTick() {
+  watchTimer = null;
+  if (!guideActive || !overlayWindow || !overlayWindow.isVisible()) return;
+
+  let cur = null;
+  try {
+    cur = await captureScreenThumbnail();
+  } catch {
+    cur = null;
+  }
+  if (!guideActive) return;
+
+  if (cur && watchPrev) {
+    const frac = changedFraction(cur, watchPrev);
+    if (frac > WATCH_CHANGE_FRACTION) {
+      if (!watchDirty) console.log(`[lazy-ai] guide: screen change detected (${(frac * 100).toFixed(1)}%), waiting for it to settle…`);
+      watchDirty = true; // the screen is in motion — the user is doing something
+    } else if (watchDirty) {
+      // it moved and has now settled → the action is complete; guide what's next
+      console.log("[lazy-ai] guide: screen settled → guiding next step");
+      runGuideTurn({ useExistingShot: false });
+      return;
+    }
+  }
+  if (cur) watchPrev = cur;
+  scheduleWatchTick();
+}
+
+async function runGuideTurn({ useExistingShot }) {
+  if (!guideActive || !overlayWindow) return;
+  stopWatching();
+
+  if (guideTurn >= GUIDE_MAX_TURNS) {
+    sendOverlayStatus("That's as far as I can guide automatically — ask again to continue.", "");
+    stopGuide();
+    return;
+  }
+
+  sendOverlayStatus("Looking at your screen…", "loading");
+
+  // The overlay is excluded from capture (content protection), so captureScreen()
+  // is already clean — no need to hide it, which also keeps any open menu/dropdown
+  // intact. Turn 1 reuses the shot taken at summon.
+  let shot;
+  try {
+    if (useExistingShot && lastScreenshot) {
+      shot = lastScreenshot;
+    } else {
+      overlayWindow.webContents.send("overlay-clear"); // wipe the old pointer while we think
+      shot = await captureScreen();
+      lastScreenshot = shot;
+    }
+  } catch (err) {
+    console.error(`[lazy-ai] Guide capture failed: ${err.message}`);
+    sendOverlayStatus("Couldn't capture the screen — try again.", "err");
+    stopGuide();
+    return;
+  }
+
+  const turnText =
+    guideTurn === 0
+      ? null // first turn: the goal (question) is the prompt
+      : `The user has now acted and the screen has changed. Continue guiding them toward their goal: "${guideGoal}". Look only at the CURRENT screen and point to the next single action — or, if the goal is now achieved, set "done": true and say so briefly.`;
+
+  let res;
+  try {
+    res = await screenTeacher.askAboutScreen({
+      imageBase64: shot.base64,
+      mediaType: shot.mediaType,
+      question: guideGoal,
+      imageWidth: shot.width,
+      imageHeight: shot.height,
+      history: guideHistory,
+      turnText,
+    });
+  } catch (err) {
+    res = { ok: false, error: String(err.message || err) };
+  }
+
+  if (!guideActive) return; // user dismissed while we were waiting on the API
+
+  if (!res.ok) {
+    sendOverlayStatus(res.error || "Something went wrong.", "err");
+    stopGuide();
+    return;
+  }
+
+  // Carry the turn forward as text only (drop the image to keep tokens sane).
+  guideHistory.push({ role: "user", content: [{ type: "text", text: (turnText || guideGoal) + " [screenshot shown]" }] });
+  guideHistory.push({ role: "assistant", content: [{ type: "text", text: res.raw }] });
+  guideTurn += 1;
+
+  overlayWindow.webContents.send("overlay-play-steps", {
+    steps: res.steps,
+    done: res.done,
+    imageWidth: shot.width,
+    imageHeight: shot.height,
+  });
+
+  // Start watching for the user's action immediately — in PARALLEL with the
+  // narration — so a click made mid-instruction is caught on the next poll
+  // instead of only after the voiceover finishes. (Our overlay is excluded from
+  // capture, so its animation never trips the detector.)
+  if (res.done) stopGuide();
+  else startWatching();
 }
 
 // ---------------------------------------------------------------------------
