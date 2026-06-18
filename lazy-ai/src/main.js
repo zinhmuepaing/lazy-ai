@@ -72,6 +72,7 @@ let activeHotkey = null; // the summon accelerator we actually managed to regist
 let activeScreenHotkey = null; // the Screen Teacher accelerator we registered
 let sourceHwnd = null; // window the selection came from, to paste back into
 let lastScreenshot = null; // { base64, mediaType, width, height } for Screen Teacher
+let activeDisplay = null; // the display the current Screen Teacher session is bound to
 
 // ---- Interactive guide loop (Live Teach) ----------------------------------
 // When the user asks a multi-step "how do I…" question, we annotate the next
@@ -84,6 +85,12 @@ let guideTurn = 0;
 let watchTimer = null; // setTimeout handle for the screen-change poll
 let watchPrev = null; // previous poll thumbnail (RGBA Buffer) for diffing
 let watchDirty = false; // true once the screen has started changing (user acting)
+
+// The Screen Teacher vision model is user-selectable in Settings; read it fresh
+// each turn so a change takes effect on the next capture/ask.
+function activeScreenTeacherModel() {
+  return settingsStore.getPublicSettings().screenTeacherModel || screenTeacher.DEFAULT_SCREEN_TEACHER_MODEL;
+}
 
 const GUIDE_MAX_TURNS = 14; // safety cap so a misbehaving loop can't run forever
 const WATCH_INTERVAL_MS = 450; // how often we poll the screen while watching (snappy detection)
@@ -123,10 +130,15 @@ ipcMain.handle("get-models", () => {
 // ---- Settings panel (Stage 3) --------------------------------------------
 ipcMain.handle("get-settings", () => {
   const pub = settingsStore.getPublicSettings();
+  const screenTeacherModels = Object.fromEntries(
+    Object.entries(screenTeacher.SCREEN_TEACHER_MODELS).map(([id, info]) => [id, { label: info.label }])
+  );
   return {
     ...pub,
     models: modelsForUI(),
     engineDefaultModel: DEFAULT_MODEL,
+    screenTeacherModels,
+    engineScreenTeacherModel: screenTeacher.DEFAULT_SCREEN_TEACHER_MODEL,
     prettyActiveHotkey: activeHotkey ? prettyHotkey(activeHotkey) : null,
   };
 });
@@ -411,10 +423,17 @@ function registerScreenTeacherHotkey() {
 // transparent click-safe overlay.
 // ---------------------------------------------------------------------------
 
-// Capture the primary display at full physical resolution so the AI's
+// The display the Screen Teacher session is bound to — chosen at summon as the
+// one under the cursor, so it works on whichever monitor the user is looking at.
+// Falls back to primary if no session is active.
+function currentDisplay() {
+  return activeDisplay || screen.getPrimaryDisplay();
+}
+
+// Capture the active display at full physical resolution so the AI's
 // pixel coordinates line up with what's on screen.
 async function captureScreen() {
-  const display = screen.getPrimaryDisplay();
+  const display = currentDisplay();
   const { width, height } = display.size; // CSS pixels
   const scaleFactor = display.scaleFactor || 1;
   const sources = await desktopCapturer.getSources({
@@ -434,7 +453,7 @@ async function captureScreen() {
   // Cap the long edge to the active model's high-res vision limit, so the model
   // isn't silently downscaling the image (which throws its coordinates off).
   // The overlay sizes its canvas to these dimensions, so coordinates stay 1:1.
-  const MAX_LONG_EDGE = screenTeacher.MAX_IMAGE_LONG_EDGE;
+  const MAX_LONG_EDGE = screenTeacher.maxEdgeFor(activeScreenTeacherModel());
   const longEdge = Math.max(size.width, size.height);
   if (longEdge > MAX_LONG_EDGE) {
     const scale = MAX_LONG_EDGE / longEdge;
@@ -454,9 +473,9 @@ async function captureScreen() {
 }
 
 function createOverlayWindow() {
-  const display = screen.getPrimaryDisplay();
+  const display = currentDisplay();
   overlayWindow = new BrowserWindow({
-    ...display.bounds, // x, y, width, height of the primary display
+    ...display.bounds, // x, y, width, height of the active display
     frame: false,
     transparent: true,
     resizable: false,
@@ -496,6 +515,10 @@ async function showScreenTeacher() {
     return;
   }
   stopGuide(); // start each session clean — no leftover watch loop
+  // Bind this session to the display under the cursor, so Screen Teacher works on
+  // whichever monitor the user is actually looking at (capture + overlay + watch
+  // all use this display until dismissed).
+  activeDisplay = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
   // Get our own windows out of the shot before capturing.
   if (mainWindow && mainWindow.isVisible()) mainWindow.hide();
   if (overlayWindow && overlayWindow.isVisible()) overlayWindow.hide();
@@ -509,7 +532,7 @@ async function showScreenTeacher() {
   }
 
   if (!overlayWindow) createOverlayWindow();
-  overlayWindow.setBounds(screen.getPrimaryDisplay().bounds);
+  overlayWindow.setBounds(currentDisplay().bounds);
   overlayWindow.show();
   overlayWindow.focus(); // keyboard focus (typing/Esc) is independent of mouse pass-through
   // Start click-through: annotations never trap the cursor; the bar re-enables
@@ -533,7 +556,7 @@ function sendOverlayStatus(text, kind = "") {
 // detection. The overlay's annotation is static while we watch, so it cancels
 // out when we diff consecutive frames — only the user's actions show up.
 async function captureScreenThumbnail() {
-  const display = screen.getPrimaryDisplay();
+  const display = currentDisplay();
   const sources = await desktopCapturer.getSources({
     types: ["screen"],
     thumbnailSize: { width: 200, height: 120 },
@@ -673,6 +696,7 @@ async function runGuideTurn({ useExistingShot }) {
       imageHeight: shot.height,
       history: guideHistory,
       turnText,
+      model: activeScreenTeacherModel(),
     });
   } catch (err) {
     res = { ok: false, error: String(err.message || err) };
@@ -694,6 +718,7 @@ async function runGuideTurn({ useExistingShot }) {
   overlayWindow.webContents.send("overlay-play-steps", {
     steps: res.steps,
     done: res.done,
+    accumulate: res.accumulate,
     imageWidth: shot.width,
     imageHeight: shot.height,
   });

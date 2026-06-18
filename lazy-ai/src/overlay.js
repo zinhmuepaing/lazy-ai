@@ -232,6 +232,14 @@ function renderStepFrame(now) {
   const progress = easeOut(Math.min(1, elapsed / ENTRANCE_MS));
   const pulse = 0.5 + 0.5 * Math.sin(elapsed / 430); // gentle breathing highlight
   clearCanvas();
+  // In "accumulate" mode (math/derivations) earlier steps stay on screen and the
+  // picture builds up. Otherwise each step REPLACES the last — only the current
+  // step is shown (default, for navigation / how-to / coding / most explanations).
+  if (walk.accumulate) {
+    for (let k = 0; k < walk.i; k++) {
+      for (const ins of walk.steps[k].draw || []) drawInstruction(ins, STATIC);
+    }
+  }
   for (const ins of step.draw || []) drawInstruction(ins, { progress, pulse, alpha: 1 });
   walk.raf = requestAnimationFrame(renderStepFrame);
 }
@@ -240,7 +248,6 @@ function playStep() {
   if (!walk) return;
   const step = walk.steps[walk.i];
   walk.stepStart = performance.now();
-  setAnswer(step.say || "", ""); // synced caption under the bar
 
   cancelAnimationFrame(walk.raf);
   walk.raf = requestAnimationFrame(renderStepFrame);
@@ -276,25 +283,19 @@ function nextStep() {
   playStep();
 }
 
-// After the last sentence: stop animating but leave that final shape on screen
-// (static, no pulse). If the task is complete we show a recap; if not, we leave
-// the cue up and tell main we've settled so it can watch for the user's action.
+// After the last sentence: stop animating but leave the final state on screen
+// (static, no pulse). In accumulate mode that's the fully built-up picture; in
+// default mode it's just the last step. Audio only; no text caption.
 function finishWalkthrough() {
   if (!walk) return;
   cancelAnimationFrame(walk.raf);
   clearTimeout(walk.timer);
   const steps = walk.steps;
-  const done = walk.done;
-  const last = steps[steps.length - 1];
+  const accumulate = walk.accumulate;
   clearCanvas();
-  for (const ins of last.draw || []) drawInstruction(ins, STATIC);
-  if (done) {
-    const recap = steps.map((s) => s.say).filter(Boolean).join(" ");
-    setAnswer(recap, "");
-  } else {
-    // mid-task: leave the instruction + pointer up. Main is already watching for
-    // the user's action (started in parallel when this step began).
-    setAnswer(last.say || "", "");
+  const resting = accumulate ? steps : [steps[steps.length - 1]];
+  for (const s of resting) {
+    for (const ins of s.draw || []) drawInstruction(ins, STATIC);
   }
   walk = null;
 }
@@ -310,14 +311,15 @@ function stopWalkthrough() {
   stopSpeaking();
 }
 
-function startWalkthrough(steps, done = true) {
+function startWalkthrough(steps, done = true, accumulate = false) {
   stopWalkthrough();
   // While guiding (done:false) the bar's button means "I've done it, continue"
   // — a manual fallback in case auto-detection ever misses the action.
   awaitingAction = !done;
   els.askBtn.textContent = done ? "Ask" : "Next ▶";
   clearCanvas();
-  walk = { steps, i: 0, stepStart: 0, raf: 0, timer: 0, done };
+  setAnswer("", ""); // audio only — hide the "Looking…" status; no narration subtitle
+  walk = { steps, i: 0, stepStart: 0, raf: 0, timer: 0, done, accumulate };
   playStep();
 }
 
@@ -342,7 +344,7 @@ window.lazyAI.onPlaySteps((data) => {
   }
   els.askBtn.disabled = false;
   const steps = data.steps && data.steps.length ? data.steps : [{ say: "Done.", draw: [] }];
-  startWalkthrough(steps, data.done !== false); // undefined → treat as done
+  startWalkthrough(steps, data.done !== false, data.accumulate === true); // undefined → done, replace
 });
 
 // Loading / error / hint captions from the loop.

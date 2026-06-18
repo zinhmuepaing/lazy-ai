@@ -5,6 +5,7 @@
 const els = {
   hotkey: document.getElementById("hotkey"),
   defaultModel: document.getElementById("defaultModel"),
+  screenTeacherModel: document.getElementById("screenTeacherModel"),
   keyAnthropic: document.getElementById("key-anthropic"),
   keyGemini: document.getElementById("key-gemini"),
   keyOpenai: document.getElementById("key-openai"),
@@ -78,6 +79,17 @@ async function load() {
     els.defaultModel.appendChild(opt);
   }
 
+  // Screen Teacher (vision) model dropdown.
+  els.screenTeacherModel.innerHTML = "";
+  const selectedScreenModel = s.screenTeacherModel || s.engineScreenTeacherModel;
+  for (const [id, info] of Object.entries(s.screenTeacherModels || {})) {
+    const opt = document.createElement("option");
+    opt.value = id;
+    opt.textContent = info.label;
+    if (id === selectedScreenModel) opt.selected = true;
+    els.screenTeacherModel.appendChild(opt);
+  }
+
   fillKeyStatus(s.keyStatus);
   showActiveHotkey(s.prettyActiveHotkey);
 }
@@ -95,6 +107,7 @@ els.saveBtn.addEventListener("click", async () => {
   const result = await window.lazyAI.saveSettings({
     hotkey: els.hotkey.value,
     defaultModel: els.defaultModel.value,
+    screenTeacherModel: els.screenTeacherModel.value,
     keys,
   });
 

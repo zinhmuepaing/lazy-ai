@@ -23,6 +23,7 @@ const KEY_ENV = {
 const DEFAULTS = {
   hotkey: "CommandOrControl+Shift+Space",
   defaultModel: null, // null → fall back to the engine's DEFAULT_MODEL
+  screenTeacherModel: null, // null → fall back to the engine's DEFAULT_SCREEN_TEACHER_MODEL
   keys: {}, // provider → encrypted blob string ("enc:…" or "raw:…")
 };
 
@@ -84,15 +85,16 @@ function getPublicSettings() {
     // as missing.
     keyStatus[provider] = Boolean(s.keys?.[provider]) || Boolean(process.env[envVar]);
   }
-  return { hotkey: s.hotkey, defaultModel: s.defaultModel, keyStatus };
+  return { hotkey: s.hotkey, defaultModel: s.defaultModel, screenTeacherModel: s.screenTeacherModel, keyStatus };
 }
 
 // Persist a settings update. `keys` values that are empty/absent leave the
 // existing stored key unchanged; a value of null explicitly clears it.
-function save({ hotkey, defaultModel, keys } = {}) {
+function save({ hotkey, defaultModel, screenTeacherModel, keys } = {}) {
   const s = readRaw();
   if (typeof hotkey === "string" && hotkey.trim()) s.hotkey = hotkey.trim();
   if (typeof defaultModel === "string") s.defaultModel = defaultModel || null;
+  if (typeof screenTeacherModel === "string") s.screenTeacherModel = screenTeacherModel || null;
 
   s.keys = s.keys || {};
   if (keys) {
