@@ -280,13 +280,17 @@ function bestOcrMatch(query, ocrLines, minScore = 0.5) {
   return best;
 }
 
-// Resolve a shape's line reference to a pixel box. PRIMARY = verbatim text match
-// ("code", + "codeTo" for a range). FALLBACK = integer index ("line"/"lines") for
-// backward compatibility. Returns the union { x, y, w, h } or null if unresolvable.
+// Resolve a shape's line reference to a pixel box, by matching its quoted TEXT to
+// the OCR line(s). Each shape resolves INDEPENDENTLY — there is deliberately no
+// integer line index and no reference to a previous box, so one bad anchor can't
+// shift the others (an earlier index-based version *did* cascade like that: the
+// model miscounted lines against the blank-stripped list and every box drifted the
+// same ~1–2 lines). "code" picks the line; "codeTo" extends to a range. Returns the
+// union { x, y, w, h } or null if nothing matches confidently.
 function rectForLineRef(shape, ocrLines) {
   let idxs = [];
 
-  // Text-match path (preferred).
+  // Primary: verbatim text the model quoted for this shape.
   if (typeof shape.code === "string" && shape.code.trim()) {
     const a = bestOcrMatch(shape.code, ocrLines);
     if (a >= 0) {
@@ -301,21 +305,10 @@ function rectForLineRef(shape, ocrLines) {
     }
   }
 
-  // Index fallback.
-  if (!idxs.length && Number.isInteger(shape.line)) idxs = [shape.line];
-  if (!idxs.length && Array.isArray(shape.lines)) {
-    const nums = shape.lines.filter((n) => Number.isInteger(n));
-    if (nums.length) {
-      const lo = Math.min(...nums);
-      const hi = Math.max(...nums);
-      for (let i = lo; i <= hi; i++) idxs.push(i);
-    }
-  }
-
-  // Last resort: if a pointing shape gave no explicit ref but its label happens to
-  // BE the line's text (the model's older habit), match on that — but only at a
-  // high floor, so a semantic caption ("the loop", "angle") that merely shares a
-  // word with a line can't hijack it. It must essentially equal the line's text.
+  // Fallback: if a pointing shape gave no "code" but its label happens to BE the
+  // line's text (the model's older habit), match on that — but only at a high floor,
+  // so a semantic caption ("the loop", "angle") that merely shares a word with a
+  // line can't hijack it. It must essentially equal the line's text.
   if (!idxs.length && shape.shape !== "label" && typeof shape.label === "string" && shape.label.trim()) {
     const a = bestOcrMatch(shape.label, ocrLines, 0.82);
     if (a >= 0) idxs = [a];
@@ -330,16 +323,32 @@ function rectForLineRef(shape, ocrLines) {
   return { x, y, w: right - x, h: bottom - y };
 }
 
+// A shape is drawable only if it carries the coordinates its type needs. Drops
+// coordinate-less leftovers (e.g. a stray `line` index now that the index path is
+// gone) so the canvas never gets garbage. Unknown shapes are left to the overlay's
+// own try/catch.
+function isDrawableShape(s) {
+  const num = (v) => Number.isFinite(v);
+  switch (s && s.shape) {
+    case "highlight":
+    case "box": return num(s.x) && num(s.y) && num(s.w) && num(s.h);
+    case "circle": return num(s.x) && num(s.y) && num(s.r);
+    case "arrow":
+    case "line": return Array.isArray(s.from) && Array.isArray(s.to) && num(s.from[0]) && num(s.from[1]) && num(s.to[0]) && num(s.to[1]);
+    case "label": return num(s.x) && num(s.y) && typeof s.text === "string";
+    default: return true;
+  }
+}
+
 // Replace line-referenced shapes with concrete pixel shapes anchored on the OCR
 // rects. A shape that carries no resolvable line ref passes through unchanged (so
-// the model's raw-pixel fallback for textless targets still works).
+// the model's raw-pixel fallback for textless targets still works); anything that
+// ends up without usable coordinates is dropped.
 function resolveLineRefs(steps, ocrLines, imageWidth, imageHeight) {
   if (!Array.isArray(ocrLines) || !ocrLines.length) return steps;
   const padX = Math.max(6, Math.round((imageWidth || 1280) / 180));
   const hasRef = (s) =>
     (typeof s.code === "string" && s.code.trim()) || // verbatim text ref (primary)
-    Number.isInteger(s.line) ||
-    (Array.isArray(s.lines) && s.lines.some((n) => Number.isInteger(n))) ||
     // a pointing shape whose label may be the line's code text (older model habit)
     (s.shape !== "label" && typeof s.label === "string" && !!s.label.trim());
 
@@ -390,7 +399,7 @@ function resolveLineRefs(steps, ocrLines, imageWidth, imageHeight) {
         h: rect.h + bandPad * 2,
         ...(label ? { label } : {}),
       };
-    }).filter(Boolean),
+    }).filter((s) => s && isDrawableShape(s)),
   }));
 }
 

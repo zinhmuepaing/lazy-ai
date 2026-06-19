@@ -64,10 +64,11 @@ const draw = (steps) => resolveLineRefs(steps, OCR, 1280, 800)[0].draw;
     d.shape === "label" && d.text === "diff = 9 - 2 = 7" && d.x >= 400 + 230 && Math.abs(d.y - 376) < 4);
 }
 
-// 6. integer index still works as a fallback (backward compat).
+// 6. a stray integer index (no "code") is IGNORED — the index path is gone, so a
+//    miscounted index can't drift the box ~2 lines or cascade across steps.
 {
-  const d = draw([{ say: "x", draw: [{ shape: "highlight", line: 3 }] }])[0];
-  check("index fallback still snaps", d.shape === "highlight" && d.y > 320 && d.y < 360);
+  const d = draw([{ say: "x", draw: [{ shape: "highlight", line: 3 }] }]);
+  check("stray integer index is dropped (no cascade path)", d.length === 0);
 }
 
 // 7. raw-pixel shape with no ref passes through unchanged.

@@ -239,6 +239,12 @@ els.bar.addEventListener("mouseleave", () => setInteractive(false));
 // animates in and pulses; when the sentence ends, clear it and reveal the next.
 // Nothing is shown upfront — each component appears as it's discussed.
 const ENTRANCE_MS = 650; // how long a shape takes to draw itself in
+// A step's shape must stay on screen at least this long, even if TTS ends/drops
+// instantly. Windows speechSynthesis sometimes drops an utterance on a rapid
+// cancel()+speak() and fires onend/onerror immediately — without this floor the
+// step would flash past and its box would look "not shown" (the "2 of 6 missing"
+// bug). Covers the entrance animation + a brief hold so every box is actually seen.
+const MIN_STEP_MS = ENTRANCE_MS + 700;
 let walk = null; // { steps, i, stepStart, raf, timer, done } | null
 let awaitingAction = false; // true while a guide step is up, waiting for the user to act
 
@@ -285,17 +291,27 @@ function playStep() {
   const myWalk = walk;
   const myIndex = walk.i;
   const advance = () => {
-    if (walk === myWalk && walk.i === myIndex) nextStep();
+    if (walk !== myWalk || walk.i !== myIndex) return;
+    // Don't advance until the box has actually been visible long enough. If TTS
+    // ended/dropped early, hold the step for the remaining time instead of skipping
+    // it — this is what guarantees every box is seen (fixes "2 of 6 not shown").
+    const elapsed = performance.now() - walk.stepStart;
+    if (elapsed < MIN_STEP_MS) {
+      clearTimeout(walk.timer);
+      walk.timer = setTimeout(advance, MIN_STEP_MS - elapsed);
+      return;
+    }
+    nextStep();
   };
 
   const estimate = estimateDurationMs(step.say);
   if (speakStep(step.say, advance)) {
     // Speaking: advance on onend, but keep a safety net — some Windows voices
     // drop the onend event, which would otherwise stall the walkthrough.
-    walk.timer = setTimeout(advance, estimate + 4000);
+    walk.timer = setTimeout(advance, Math.max(estimate, MIN_STEP_MS) + 4000);
   } else {
-    // Muted/unavailable: pace purely on the estimated reading time.
-    walk.timer = setTimeout(advance, estimate);
+    // Muted/unavailable: pace purely on the estimated reading time (≥ the floor).
+    walk.timer = setTimeout(advance, Math.max(estimate, MIN_STEP_MS));
   }
 }
 
