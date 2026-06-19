@@ -17,10 +17,15 @@
       <input id="question" type="text" placeholder="ask about what's on your screen… (Enter to ask, Esc to close)" />
       <button id="micBtn" class="ghost" title="Click to speak your question">🎤</button>
       <button id="askBtn" class="primary">Ask</button>
-      <button id="ttsBtn" class="ghost" title="Speech on — click to mute">🔊</button>
       <button id="closeBtn" class="close-btn" title="Close (Esc)">✕</button>
     </div>
-    <div id="answer"></div>
+
+    <!-- Floating status: plain centered text (no box, so it never covers an app's
+         input field) + a small audio-wave shown while speaking. -->
+    <div id="status">
+      <span id="status-text"></span>
+      <span id="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+    </div>
 
     <script src="overlay.js"></script>
   </body>

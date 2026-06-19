@@ -9,9 +9,9 @@ const els = {
   question: document.getElementById("question"),
   askBtn: document.getElementById("askBtn"),
   micBtn: document.getElementById("micBtn"),
-  ttsBtn: document.getElementById("ttsBtn"),
   closeBtn: document.getElementById("closeBtn"),
-  answer: document.getElementById("answer"),
+  status: document.getElementById("status"),
+  statusText: document.getElementById("status-text"),
 };
 
 // Canvas internal resolution = screenshot pixels, so AI coordinates (which map
@@ -33,9 +33,17 @@ function clearCanvas() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 }
 
+// Floating, container-less status text (centered) + an audio-wave shown while
+// speaking. `kind` colors it (loading / err / ok). The "speaking" class is kept
+// across text updates so the wave doesn't flicker mid-utterance.
 function setAnswer(text, kind = "") {
-  els.answer.textContent = text;
-  els.answer.className = (text ? "show" : "") + (kind ? " " + kind : "");
+  els.statusText.textContent = text || "";
+  const speaking = els.status.classList.contains("speaking");
+  els.status.className = (text ? "show" : "") + (kind ? " " + kind : "") + (speaking ? " speaking" : "");
+}
+
+function setSpeaking(on) {
+  els.status.classList.toggle("speaking", on);
 }
 
 // ---- Drawing primitives (coordinates are screenshot pixels) ---------------
@@ -169,50 +177,36 @@ function drawInstruction(ins, a) {
 }
 
 // ---- Text-to-speech (free, local Windows voice via speechSynthesis) -------
-let ttsEnabled = localStorage.getItem("lazyTts") !== "off"; // default on
-
-function updateTtsButton() {
-  els.ttsBtn.textContent = ttsEnabled ? "🔊" : "🔇";
-  els.ttsBtn.title = ttsEnabled ? "Speech on — click to mute" : "Speech off — click to unmute";
-}
-
-// Speak one step's sentence; call `onend` when it finishes (or can't be spoken),
-// so the walkthrough advances in time with the voice.
+// Always on (no mute button — the bar stays slim). The audio-wave animation
+// shows while a sentence is being spoken.
 function speakStep(text, onend) {
-  if (!ttsEnabled || !text || !window.speechSynthesis) return false;
+  if (!text || !window.speechSynthesis) return false;
   window.speechSynthesis.cancel(); // never overlap with the previous sentence
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.rate = 1.05;
-  utterance.onend = onend;
-  utterance.onerror = onend; // don't stall the walkthrough if TTS hiccups
+  utterance.onstart = () => setSpeaking(true);
+  utterance.onend = () => { setSpeaking(false); onend(); };
+  utterance.onerror = () => { setSpeaking(false); onend(); }; // don't stall on a hiccup
   window.speechSynthesis.speak(utterance);
   return true;
 }
 
 function stopSpeaking() {
+  setSpeaking(false);
   if (window.speechSynthesis) window.speechSynthesis.cancel();
 }
-
-els.ttsBtn.addEventListener("click", () => {
-  ttsEnabled = !ttsEnabled;
-  localStorage.setItem("lazyTts", ttsEnabled ? "on" : "off");
-  updateTtsButton();
-  if (!ttsEnabled) stopSpeaking();
-});
-updateTtsButton();
 
 // ---- Click-through overlay (Stage 4.4 prerequisite) -----------------------
 // The window is click-through by default so annotations never trap the cursor —
 // you keep using the app underneath. We flip it solid only while the pointer is
-// over an interactive panel (the control bar or the answer box), so its
-// buttons/input still work. enter/leave fire because main forwards mouse-move.
+// over the control bar so its buttons/input work. (The status text is
+// click-through, so it never traps the cursor.) enter/leave fire because main
+// forwards mouse-move.
 function setInteractive(on) {
   window.lazyAI.setIgnoreMouse(!on);
 }
-for (const panel of [els.bar, els.answer]) {
-  panel.addEventListener("mouseenter", () => setInteractive(true));
-  panel.addEventListener("mouseleave", () => setInteractive(false));
-}
+els.bar.addEventListener("mouseenter", () => setInteractive(true));
+els.bar.addEventListener("mouseleave", () => setInteractive(false));
 
 // ---- Narrated walkthrough (Live Teach) ------------------------------------
 // Plays the AI's steps in order: speak one sentence while ONLY that step's shape
@@ -252,6 +246,9 @@ function playStep() {
   if (!walk) return;
   const step = walk.steps[walk.i];
   walk.stepStart = performance.now();
+
+  // No subtitle — both modes are audio-only. Only "Planning…" (status) and the
+  // audio-wave (while speaking) are ever shown.
 
   cancelAnimationFrame(walk.raf);
   walk.raf = requestAnimationFrame(renderStepFrame);

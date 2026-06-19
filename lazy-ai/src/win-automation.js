@@ -16,6 +16,8 @@ const GRAB_SCRIPT = path.join(__dirname, "grab-selection.ps1");
 const PASTE_SCRIPT = path.join(__dirname, "paste-result.ps1");
 const CONTROL_SCRIPT = path.join(__dirname, "control-action.ps1");
 const BATCH_SCRIPT = path.join(__dirname, "control-batch.ps1");
+const UIA_QUERY_SCRIPT = path.join(__dirname, "uia-query.ps1");
+const FOREGROUND_SCRIPT = path.join(__dirname, "foreground.ps1");
 
 // Run a PowerShell script file, resolving with trimmed stdout.
 function runScript(scriptPath, args = [], timeoutMs = 5000) {
@@ -95,15 +97,48 @@ function composeSendKeys(combo) {
 // coords are PHYSICAL pixels, "press" carries a `send` SendKeys string. The plan
 // is handed over via a temp JSON file (safe for arbitrary text). `timeoutMs`
 // should budget for the plan's own waits.
-async function performPlan(actions, timeoutMs = 20000) {
+async function performPlan(actions, timeoutMs = 20000, targetHwnd = 0) {
   if (!isWindows) throw new Error("Screen Control is Windows-only (PowerShell automation).");
   const file = path.join(os.tmpdir(), `lazy-ai-plan-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
   await fs.promises.writeFile(file, JSON.stringify(actions || []), "utf8");
+  const args = ["-PlanFile", file];
+  if (targetHwnd) args.push("-TargetHwnd", String(targetHwnd)); // for UIA re-find
   try {
-    await runScript(BATCH_SCRIPT, ["-PlanFile", file], timeoutMs);
+    await runScript(BATCH_SCRIPT, args, timeoutMs);
   } finally {
     fs.promises.unlink(file).catch(() => {});
   }
 }
 
-module.exports = { isWindows, grabSelection, focusAndPaste, performAction, performPlan, composeSendKeys };
+// The window that was foreground (the target app the user summoned over), so we
+// can query/act on it even after our overlay takes focus. 0 on failure.
+async function getForegroundWindow() {
+  if (!isWindows) return 0;
+  try {
+    const out = await runScript(FOREGROUND_SCRIPT, [], 5000);
+    return Number(out.trim()) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+// Query the target window's UIA elements (Stage 5.4). Uses the live foreground
+// window, but if that's our overlay (excludeHwnd) or none, falls back to the
+// known target (fallbackHwnd) — so an already-open app is still seen. Returns
+// { hwnd, elements } (elements have PHYSICAL-pixel rects), or { hwnd:0, elements:[] }.
+async function queryUiElements(excludeHwnd = 0, fallbackHwnd = 0, max = 80) {
+  if (!isWindows) return { hwnd: 0, elements: [] };
+  try {
+    const out = await runScript(
+      UIA_QUERY_SCRIPT,
+      ["-ExcludeHwnd", String(excludeHwnd || 0), "-FallbackHwnd", String(fallbackHwnd || 0), "-Max", String(max)],
+      10000
+    );
+    const data = JSON.parse(out);
+    return { hwnd: Number(data.hwnd) || 0, elements: Array.isArray(data.elements) ? data.elements : [] };
+  } catch {
+    return { hwnd: 0, elements: [] };
+  }
+}
+
+module.exports = { isWindows, grabSelection, focusAndPaste, performAction, performPlan, composeSendKeys, queryUiElements, getForegroundWindow };

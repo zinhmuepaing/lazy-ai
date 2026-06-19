@@ -66,7 +66,8 @@ async function callAnthropic(apiModel, userMessage) {
 
   if (!res.ok) throw new Error(`Anthropic ${res.status}: ${await res.text()}`);
   const data = await res.json();
-  return data.content?.[0]?.text?.trim() ?? "";
+  // Take the TEXT block(s) — content[0] can be a "thinking" block on some models.
+  return (data.content || []).filter((c) => c && c.type === "text").map((c) => c.text || "").join("").trim();
 }
 
 async function callGemini(apiModel, userMessage) {

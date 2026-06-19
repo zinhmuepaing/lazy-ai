@@ -85,6 +85,9 @@ let controlActive = false; // a multi-step Screen Control command is running
 let controlGoal = ""; // the user's command/goal for the control loop
 let controlHistory = []; // Anthropic messages (text-only) across control turns
 let controlTurnCount = 0;
+let controlElements = []; // this turn's UIA element list (idx,name,type,rect,…)
+let controlTargetHwnd = 0; // the target app window (for UIA re-find at execution)
+let controlSourceHwnd = 0; // foreground window captured at summon (the app the user was in)
 let sourceHwnd = null; // window the selection came from, to paste back into
 let lastScreenshot = null; // { base64, mediaType, width, height } for Screen Teacher
 let activeDisplay = null; // the display the current Screen Teacher session is bound to
@@ -570,6 +573,9 @@ async function summonOverlay(mode) {
   stopGuide(); // start each session clean — no leftover watch loop
   stopControl();
   overlayMode = mode;
+  // For control: capture the target app window NOW, before our overlay steals
+  // focus — so we can query/act on it even once the overlay is foreground.
+  controlSourceHwnd = mode === "control" ? await winAutomation.getForegroundWindow() : 0;
   // Bind this session to the display under the cursor, so it works on whichever
   // monitor the user is looking at (capture + overlay + watch all use it).
   activeDisplay = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
@@ -684,6 +690,27 @@ function fractionToPhysical(fx, fy) {
   };
   const phys = screen.dipToScreenPoint(dipPoint);
   return { x: Math.round(phys.x), y: Math.round(phys.y) };
+}
+
+// Inverse: a PHYSICAL screen pixel → overlay-canvas pixel (canvas = screenshot
+// size), so a UIA element's real rect can be marked accurately in the preview.
+function physicalToCanvas(px, py, shot) {
+  const d = currentDisplay();
+  const dip = screen.screenToDipPoint({ x: Math.round(px), y: Math.round(py) });
+  const fx = d.bounds.width ? (dip.x - d.bounds.x) / d.bounds.width : 0;
+  const fy = d.bounds.height ? (dip.y - d.bounds.y) / d.bounds.height : 0;
+  return { x: Math.round(fx * shot.width), y: Math.round(fy * shot.height) };
+}
+
+// Our overlay's native window handle, so the UIA query can skip it (the overlay
+// is never a target). Returns 0 if unavailable.
+function overlayHwnd() {
+  try {
+    const buf = overlayWindow.getNativeWindowHandle();
+    return buf.length >= 8 ? Number(buf.readBigUInt64LE()) : buf.readUInt32LE();
+  } catch {
+    return 0;
+  }
 }
 
 async function startGuide(question) {
@@ -832,7 +859,7 @@ async function runGuideTurn({ useExistingShot }) {
 // PowerShell run; vision-clicks are the fallback within the same plan.
 // ---------------------------------------------------------------------------
 const CONTROL_PREVIEW_MS = 400; // brief, cancelable preview before a batch runs
-const CONTROL_MAX_TURNS = 8; // safety cap on re-plans so a loop can't run forever
+const CONTROL_MAX_TURNS = 14; // safety cap on re-plans (multi-step app tasks need headroom)
 const SPATIAL_TYPES = ["click", "doubleclick", "rightclick", "scroll"];
 
 async function startControlGoal(command) {
@@ -842,6 +869,7 @@ async function startControlGoal(command) {
   controlGoal = (command || "").trim();
   controlHistory = [];
   controlTurnCount = 0;
+  controlTargetHwnd = controlSourceHwnd; // start from the app the user summoned over
   await controlTurn({ useExistingShot: true });
 }
 
@@ -860,8 +888,10 @@ async function waitForScreenSettle({ maxMs = 2000, interval = 250 } = {}) {
 }
 
 // Turn the model's plan into a fully-resolved batch the PowerShell executor can
-// run directly: click/scroll coords → physical pixels, key combos → SendKeys.
-function resolvePlan(actions) {
+// run directly: key combos → SendKeys; vision %-coords → physical pixels; UIA
+// element refs → {id,name,physical center} for the executor to re-find/invoke.
+function resolvePlan(actions, elements) {
+  const byRef = (ref) => (Array.isArray(elements) ? elements.find((e) => e.idx === ref) : null);
   const resolved = [];
   for (const a of actions) {
     if (a.type === "launch") resolved.push({ type: "launch", app: a.app });
@@ -874,6 +904,14 @@ function resolvePlan(actions) {
     } else if (a.type === "click" || a.type === "doubleclick" || a.type === "rightclick") {
       const p = fractionToPhysical(a.xPct / 100, a.yPct / 100);
       resolved.push({ type: a.type, x: p.x, y: p.y });
+    } else if (a.type === "ui_invoke" || a.type === "ui_click" || a.type === "ui_type") {
+      const el = byRef(a.ref);
+      if (!el) continue; // stale ref → drop
+      const cx = Math.round(el.x + el.w / 2); // element center (physical px)
+      const cy = Math.round(el.y + el.h / 2);
+      if (a.type === "ui_click") resolved.push({ type: "uia", verb: "click", x: cx, y: cy });
+      else if (a.type === "ui_invoke") resolved.push({ type: "uia", verb: "invoke", id: el.id, name: el.name, x: cx, y: cy });
+      else resolved.push({ type: "uia", verb: "settext", id: el.id, name: el.name, x: cx, y: cy, text: a.text });
     }
   }
   return resolved;
@@ -897,8 +935,17 @@ async function controlTurn({ useExistingShot }) {
   sendOverlayStatus("Planning…", "loading");
   let shot;
   try {
-    shot = useExistingShot && lastScreenshot ? lastScreenshot : await captureScreen(maxEdgeForModel(controlModel()));
+    // Capture + UIA query in parallel (independent). queryUiElements never throws.
+    // Query uses the live foreground, falling back to the known target window so
+    // an already-open app is seen even while our overlay is foreground.
+    const [s, ui] = await Promise.all([
+      useExistingShot && lastScreenshot ? Promise.resolve(lastScreenshot) : captureScreen(maxEdgeForModel(controlModel())),
+      winAutomation.queryUiElements(overlayHwnd(), controlTargetHwnd, 80),
+    ]);
+    shot = s;
     lastScreenshot = shot;
+    controlElements = ui.elements || [];
+    if (ui.hwnd) controlTargetHwnd = ui.hwnd; // track the resolved target window
   } catch (err) {
     sendOverlayStatus("Couldn't capture the screen — try again.", "err");
     stopControl();
@@ -921,6 +968,7 @@ async function controlTurn({ useExistingShot }) {
       model: controlModel(), // must match the capture cap above
       history: controlHistory,
       turnText,
+      elements: controlElements,
     });
   } catch (err) {
     res = { ok: false, error: String(err.message || err) };
@@ -952,17 +1000,21 @@ async function controlTurn({ useExistingShot }) {
     return;
   }
 
-  // Preview: speak the plan's summary and mark any click/scroll targets, then run
-  // the whole batch after a short, cancelable delay.
-  const draw = plan.actions
-    .filter((a) => SPATIAL_TYPES.includes(a.type))
-    .map((a) => ({
-      shape: "circle",
-      x: Math.round((a.xPct / 100) * shot.width), // % → canvas pixels (canvas = screenshot size)
-      y: Math.round((a.yPct / 100) * shot.height),
-      r: Math.max(26, Math.round(shot.width / 60)),
-      label: a.type,
-    }));
+  // Preview: speak the plan's summary and mark any click targets — both vision
+  // %-clicks and UIA element targets (drawn on the element's real rect center).
+  const r = Math.max(26, Math.round(shot.width / 60));
+  const draw = [];
+  for (const a of plan.actions) {
+    if (SPATIAL_TYPES.includes(a.type)) {
+      draw.push({ shape: "circle", x: Math.round((a.xPct / 100) * shot.width), y: Math.round((a.yPct / 100) * shot.height), r, label: a.type });
+    } else if (a.type === "ui_invoke" || a.type === "ui_click" || a.type === "ui_type") {
+      const el = controlElements.find((e) => e.idx === a.ref);
+      if (el) {
+        const c = physicalToCanvas(el.x + el.w / 2, el.y + el.h / 2, shot);
+        draw.push({ shape: "circle", x: c.x, y: c.y, r, label: a.type.replace("ui_", "") });
+      }
+    }
+  }
   overlayWindow.webContents.send("overlay-play-steps", {
     steps: [{ say: plan.say || "Working…", draw }],
     done: true,
@@ -971,12 +1023,13 @@ async function controlTurn({ useExistingShot }) {
     imageHeight: shot.height,
   });
 
-  const resolved = resolvePlan(plan.actions);
+  const resolved = resolvePlan(plan.actions, controlElements);
+  const targetHwnd = controlTargetHwnd;
   controlTimer = setTimeout(async () => {
     controlTimer = null;
     if (!controlActive) return;
     try {
-      await winAutomation.performPlan(resolved, planTimeoutMs(plan.actions));
+      await winAutomation.performPlan(resolved, planTimeoutMs(plan.actions), targetHwnd);
     } catch (err) {
       sendOverlayStatus(`Action failed: ${String(err.message || err)}`, "err");
       stopControl();

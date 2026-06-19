@@ -202,7 +202,8 @@ async function askAboutScreen({ imageBase64, mediaType = "image/png", question, 
 
     if (!res.ok) return { ok: false, error: `Anthropic ${res.status}: ${await res.text()}` };
     const data = await res.json();
-    const text = data.content?.[0]?.text?.trim() ?? "";
+    // Take the TEXT block(s) — content[0] can be a "thinking" block (adaptive thinking).
+    const text = (data.content || []).filter((c) => c && c.type === "text").map((c) => c.text || "").join("").trim();
     const { steps, explanation, done, accumulate } = parseSteps(text);
     return { ok: true, steps, explanation, done, accumulate, raw: text };
   } catch (err) {
@@ -250,7 +251,7 @@ async function cleanVoiceQuery(rawText) {
     });
     if (!res.ok) return text;
     const data = await res.json();
-    const cleaned = data.content?.[0]?.text?.trim();
+    const cleaned = (data.content || []).filter((c) => c && c.type === "text").map((c) => c.text || "").join("").trim();
     return cleaned || text;
   } catch {
     return text; // network/parse failure → fall back to raw
