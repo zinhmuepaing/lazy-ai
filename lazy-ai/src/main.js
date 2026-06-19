@@ -110,6 +110,13 @@ function activeScreenTeacherModel() {
   return settingsStore.getPublicSettings().screenTeacherModel || screenTeacher.DEFAULT_SCREEN_TEACHER_MODEL;
 }
 
+// Whether to OCR the screenshot and let the model point at lines by index (we snap
+// the annotation to the real rect). Only the prior-gen vision models (Sonnet) need
+// this — Opus 4.7/4.8 place pixels accurately, so they keep the lighter pixel path.
+function usesOcrLineSnapping(model) {
+  return /sonnet/i.test(model || "");
+}
+
 // Screen Control plans with a fast/cheap model (Sonnet 4.6) — separate from the
 // Teacher picker. Captures for control MUST be capped to this model's vision
 // limit, or its coordinates drift.
@@ -806,6 +813,20 @@ async function runGuideTurn({ useExistingShot }) {
       ? null // first turn: the goal (question) is the prompt
       : `The user has now acted and the screen has changed. Continue guiding them toward their goal: "${guideGoal}". Look only at the CURRENT screen and point to the next single action — or, if the goal is now achieved, set "done": true and say so briefly.`;
 
+  const model = activeScreenTeacherModel();
+  // Sonnet path: OCR this exact screenshot so the model can point at code/text
+  // lines by index (we snap to the real rect). Best-effort — [] falls back cleanly
+  // to the pixel path. Opus skips OCR entirely (keeps its accurate pixel path).
+  let ocrLines = [];
+  if (usesOcrLineSnapping(model)) {
+    try {
+      ocrLines = await winAutomation.ocrImage(shot.base64);
+    } catch {
+      ocrLines = [];
+    }
+    if (!guideActive) return; // dismissed while OCR ran
+  }
+
   let res;
   try {
     res = await screenTeacher.askAboutScreen({
@@ -816,7 +837,8 @@ async function runGuideTurn({ useExistingShot }) {
       imageHeight: shot.height,
       history: guideHistory,
       turnText,
-      model: activeScreenTeacherModel(),
+      model,
+      ocrLines,
     });
   } catch (err) {
     res = { ok: false, error: String(err.message || err) };
@@ -836,7 +858,7 @@ async function runGuideTurn({ useExistingShot }) {
   guideTurn += 1;
 
   overlayWindow.webContents.send("overlay-play-steps", {
-    steps: res.steps,
+    steps: res.steps, // Teacher draw-coords are absolute pixels in screenshot space
     done: res.done,
     accumulate: res.accumulate,
     imageWidth: shot.width,
@@ -890,8 +912,22 @@ async function waitForScreenSettle({ maxMs = 2000, interval = 250 } = {}) {
 // Turn the model's plan into a fully-resolved batch the PowerShell executor can
 // run directly: key combos → SendKeys; vision %-coords → physical pixels; UIA
 // element refs → {id,name,physical center} for the executor to re-find/invoke.
-function resolvePlan(actions, elements) {
+// Is the user's goal to SEND/WRITE a message (as opposed to merely searching)?
+// Used to enforce the search-box-vs-message-box guard below.
+function isMessagingGoal(goal) {
+  return /\b(message|messaging|msg|send|tell|reply|writ|compose|say|dm|text|chat|ping)\b/i.test(String(goal || ""));
+}
+
+// Phase 3 — element disambiguation guard. The model sometimes targets the SEARCH
+// box (top of Teams/Outlook/Slack) for a ui_type that should go in the MESSAGE box
+// (bottom) — both are edit fields, so the prompt alone isn't enough. These are
+// CODE-level guards (not prompt-only): we verify the chosen element's properties
+// and DROP an unsafe ui_type so the loop re-plans rather than dumping the message
+// into the wrong field. Dropping (not redirecting) keeps it honest — we never
+// silently retarget the model's ref; we just refuse the obviously-wrong one.
+function resolvePlan(actions, elements, goal) {
   const byRef = (ref) => (Array.isArray(elements) ? elements.find((e) => e.idx === ref) : null);
+  const messaging = isMessagingGoal(goal);
   const resolved = [];
   for (const a of actions) {
     if (a.type === "launch") resolved.push({ type: "launch", app: a.app });
@@ -907,6 +943,21 @@ function resolvePlan(actions, elements) {
     } else if (a.type === "ui_invoke" || a.type === "ui_click" || a.type === "ui_type") {
       const el = byRef(a.ref);
       if (!el) continue; // stale ref → drop
+      if (a.type === "ui_type") {
+        // Guard 1 — never type into a non-editable control (a button/icon/tab has
+        // no Value pattern and an edit/text/combo/document type). Skip + re-plan.
+        const editable = el.value || /edit|text|combo|document/i.test(String(el.type || ""));
+        if (!editable) {
+          console.warn(`[lazy-ai] control: blocked ui_type into non-editable "${el.name}" (${el.type})`);
+          continue;
+        }
+        // Guard 2 — when the goal is to send a message, never type it into a field
+        // named like a search box. The message belongs in the compose field.
+        if (messaging && /search|find/i.test(`${el.name || ""} ${el.id || ""}`)) {
+          console.warn(`[lazy-ai] control: blocked message ui_type into search field "${el.name}"`);
+          continue;
+        }
+      }
       const cx = Math.round(el.x + el.w / 2); // element center (physical px)
       const cy = Math.round(el.y + el.h / 2);
       if (a.type === "ui_click") resolved.push({ type: "uia", verb: "click", x: cx, y: cy });
@@ -1023,7 +1074,7 @@ async function controlTurn({ useExistingShot }) {
     imageHeight: shot.height,
   });
 
-  const resolved = resolvePlan(plan.actions, controlElements);
+  const resolved = resolvePlan(plan.actions, controlElements, controlGoal);
   const targetHwnd = controlTargetHwnd;
   controlTimer = setTimeout(async () => {
     controlTimer = null;

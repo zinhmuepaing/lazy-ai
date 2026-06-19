@@ -4,7 +4,8 @@
   "description": "Lazy AI — an always-on AI overlay companion for Windows. Stage 2: Prompt Polisher.",
   "main": "src/main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "test": "node test/parse-plan.test.js && node test/teacher-linesnap.test.js"
   },
   "author": "",
   "license": "MIT",

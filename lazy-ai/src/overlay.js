@@ -123,6 +123,31 @@ function drawArrow(from, to, label, a) {
   if (label && progress > 0.5) drawLabel(x1, y1 - 10, label, alpha * Math.min(1, (progress - 0.5) / 0.5));
 }
 
+// A translucent band over a line (or line range) of code/text — like a code
+// editor's current-line highlight. This is the Teacher's primary tool for
+// pointing at exact lines: a filled band keyed to the line grid reads clearly
+// even when the model's x/w are loose, so it's far more forgiving than a tight
+// box. It wipes in from the left and breathes (alpha) with the step's pulse,
+// with a bright left accent bar like an editor's current-line marker.
+function drawHighlight(x, y, w, h, label, a) {
+  const { progress, pulse, alpha } = a;
+  ctx.save();
+  ctx.globalAlpha = alpha * Math.min(1, progress / 0.35); // fade in early
+  const ww = w * easeOut(Math.min(1, progress / 0.8)); // band wipes in left→right
+  ctx.shadowColor = ACCENT;
+  ctx.shadowBlur = 16 * pulse;
+  ctx.fillStyle = `rgba(109, 124, 255, ${0.15 + 0.1 * pulse})`;
+  ctx.beginPath();
+  ctx.roundRect(x, y, ww, h, 4);
+  ctx.fill();
+  // bright left accent bar — the editor "current line" marker
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = ACCENT;
+  ctx.fillRect(x, y, Math.max(3, baseStroke() * 0.7), h);
+  ctx.restore();
+  if (label && progress > 0.4) drawLabel(x, y - 6, label, alpha);
+}
+
 function drawBox(x, y, w, h, label, a) {
   const { progress, pulse, alpha } = a;
   ctx.save();
@@ -166,6 +191,7 @@ function drawInstruction(ins, a) {
   try {
     switch (ins.shape) {
       case "arrow": drawArrow(ins.from, ins.to, ins.label, a); break;
+      case "highlight": drawHighlight(ins.x, ins.y, ins.w, ins.h, ins.label, a); break;
       case "box": drawBox(ins.x, ins.y, ins.w, ins.h, ins.label, a); break;
       case "circle": drawCircle(ins.x, ins.y, ins.r, ins.label, a); break;
       case "line": drawLine(ins.from, ins.to, a); break;

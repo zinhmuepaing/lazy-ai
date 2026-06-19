@@ -51,6 +51,7 @@ CRITICAL accuracy rules (these caused real failures):
 - ACT ONLY ON REAL CONTROLS. every action must target an actual control — a UI ELEMENTS entry (preferred) or a clearly visible, identifiable control. NEVER click or point at empty/blank space (a chat transcript area, a page background, padding). a click on blank space does nothing and just wastes a turn.
 - TO ENTER TEXT, use {"type":"ui_type","ref":N} on an element marked [editable] (an edit / text box / combo box) — that IS the text field (message box, compose area, search box). ui_type focuses the real field and types, so you do NOT need a separate click, and you must NEVER click a blank region to "focus" a field. NEVER ui_type a button, tab, menu item, or icon — a magnifier/search icon or a "find" button is NOT a message box. if there is no [editable] element in the list yet (the field hasn't rendered), do NOT improvise on a button — emit a short {"type":"wait","ms":900} with "done":false and look again.
 - match the field to the task: type a message into the message/compose field, a query into the search field — reason from each element's name/type, don't assume.
+- SEARCH BOX vs MESSAGE BOX (this caused the wrong-field bug): chat apps (Teams, Outlook, Slack) have a SEARCH box at the TOP of the window AND a separate MESSAGE/compose box at the BOTTOM — BOTH are [editable]. To SEND A MESSAGE you MUST ui_type into the element whose NAME is the compose field (its name reads like "Type a message", "Write a message", "Compose", "Reply", "Message") and you must NEVER type the message into an element named "Search", "Find" or "Search box". Read each [editable] element's name and pick by name. Use the SEARCH box only to look up a person/thing — never to send the message.
 - DON'T REPEAT yourself. your previous turns are in the conversation. before acting, read the CURRENT screen and check what is already done: if your text is already in the field, do NOT type it again — just send it (e.g. press enter / the Send button). if the goal is already achieved (e.g. your message now appears in the conversation), return "actions":[] with "done":true. typing the same text twice, or re-doing a finished step, is a bug.
 - when sending a message, do it in ONE turn: ui_type the message INTO the [editable] field, then send (ui_invoke the Send button, or press enter), then "done":true — so you don't loop.
 - to choose a SEARCH RESULT, use {"type":"ui_invoke","ref":N} on the result's element (the row with the right name/label) — not a filter chip/tab, and not a blind "down"+"enter" (in many apps that lands on a chip above the results).
@@ -86,19 +87,42 @@ command "open Microsoft Teams and message Bhone Min Thant" → FIRST turn (open 
 ]}
 (then LOOK; next turn CLICK his contact row in the results; the turn after, type the message + enter)
 
-the command may come from imperfect speech-to-text (homophones, brand/app names, dropped small words) — interpret it CHARITABLY. output ONLY the JSON object. no preamble, no markdown fences, no text outside the JSON.`;
+the command may come from imperfect speech-to-text (homophones, brand/app names, dropped small words) — interpret it CHARITABLY.
+
+OUTPUT BUDGET (important): your entire reply must be ONE small JSON object and nothing else — no preamble, no reasoning, no markdown fences, no text outside the JSON. keep "say" to ≤ ~8 words. emit only the actions needed for THIS turn (you'll get more turns). a short reply avoids being cut off.`;
 
 const VALID_TYPES = new Set([
   "ui_invoke", "ui_click", "ui_type", // Stage 5.4 — act on real UI elements by ref
   "launch", "press", "text", "wait", "scroll", "click", "doubleclick", "rightclick",
 ]);
 
+// Phase 1 — UIA pruning (space-complexity fix). A raw UIA dump of an app like
+// Teams is hundreds of elements: every chat bubble, avatar, timestamp and layout
+// group. That bloat is the *disease* behind the truncation — it forces Sonnet
+// into heavy adaptive thinking and burns the 1024-token budget mid-JSON. Salvaging
+// the truncated tail only treated the symptom; pruning removes the cause.
+//
+// Keep ONLY elements the model can actually act on: anything Invokable (buttons,
+// links, selectable rows) or with a Value pattern (text fields), plus controls
+// whose type is clearly interactive (edit / button / combo box). Static text
+// (chat bubbles, labels, timestamps) and containers have none of these and are
+// dropped. `idx` is preserved, so refs the model returns still resolve against
+// the FULL element list in main.js — pruning changes only what the LLM sees.
+function pruneElements(elements) {
+  if (!Array.isArray(elements)) return [];
+  return elements.filter((e) => {
+    if (!e) return false;
+    if (e.invoke || e.value) return true; // actionable or editable → keep
+    return /edit|button|combo/i.test(String(e.type || "")); // interactive type → keep
+  });
+}
+
 // Render the UIA element list for the prompt. `elements` come from win-automation
 // queryUiElements (idx,name,type,invoke,value). Cap name length to keep it compact.
 function formatElements(elements) {
   if (!Array.isArray(elements) || !elements.length) return "";
   const lines = elements.map((e) => {
-    const name = String(e.name || "").replace(/\s+/g, " ").slice(0, 60);
+    const name = String(e.name || "").replace(/\s+/g, " ").slice(0, 40);
     const tags = `${e.invoke ? " [invoke]" : ""}${e.value ? " [editable]" : ""}`;
     return `${e.idx}: ${e.type || "control"} "${name}"${tags}`;
   });
@@ -115,6 +139,43 @@ function tryParseJson(s) {
   } catch {
     return null;
   }
+}
+
+// Salvage a usable JSON object from a TRUNCATED reply (the model hit max_tokens
+// mid-output — common on heavy turns with a large UIA list + adaptive thinking).
+// Walks from the first "{", tracking string/escape state and the bracket stack,
+// then closes any open string and brackets and strips a dangling comma / "key":.
+// Returns { json, repaired } or null. `repaired:true` flags that the tail was
+// completed, so the caller can drop the (suspect) last action.
+function salvageJson(text) {
+  const start = (text || "").indexOf("{");
+  if (start < 0) return null;
+  const s = text.slice(start);
+  const stack = [];
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (esc) { esc = false; continue; }
+    if (c === "\\") { esc = inStr; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === "{" || c === "[") stack.push(c);
+    else if (c === "}" || c === "]") stack.pop();
+  }
+  let out = s;
+  const stringCut = inStr; // a string value was cut mid-way → its last action is suspect
+  if (inStr) out += '"'; // close the cut-off string
+  // Strip a dangling tail: trailing commas, or a "key": with no value yet.
+  let prev;
+  do {
+    prev = out;
+    out = out.replace(/[\s,]+$/, "");
+    out = out.replace(/"[^"]*"\s*:\s*$/, "");
+  } while (out !== prev);
+  out = out.replace(/[\s,]+$/, "");
+  while (stack.length) out += stack.pop() === "{" ? "}" : "]";
+  return { json: out, stringCut };
 }
 
 // Clamp a percentage (0–100) to a safe number; accepts "45.5%" or 45.5.
@@ -164,17 +225,34 @@ function sanitizeActions(raw) {
   return out;
 }
 
-// Parse the model's reply into a plan { done, say, actions:[…] }. Tolerates fences/prose.
+// Parse the model's reply into a plan { done, say, actions:[…] }. Tolerates code
+// fences, prose around the JSON, AND truncation (recovers the complete actions
+// from a cut-off reply instead of discarding everything).
 function parsePlan(text) {
   const cleaned = (text || "").replace(/```json/gi, "```").replace(/```/g, "").trim();
+
+  // Fast path: a clean, complete JSON object.
   let data = tryParseJson(cleaned);
-  if (!data) {
-    const m = cleaned.match(/\{[\s\S]*\}/);
-    data = m && tryParseJson(m[0]);
+
+  // Otherwise salvage from the first "{": repairs truncation and ignores prose.
+  let stringCut = false;
+  if (!data || typeof data !== "object") {
+    const sal = salvageJson(cleaned);
+    if (sal) {
+      data = tryParseJson(sal.json);
+      stringCut = sal.stringCut;
+    }
   }
+
   if (!data || typeof data !== "object") {
     return { done: true, say: "I couldn't work out a safe plan for that.", actions: [] };
   }
+
+  // If a string value was truncated, the LAST action straddled the cut and may be
+  // partial — drop it and let the loop re-plan the remainder. (When only brackets
+  // were closed, the actions before the cut were complete, so keep them all.)
+  if (stringCut && Array.isArray(data.actions) && data.actions.length) data.actions.pop();
+
   return {
     done: data.done !== false, // default true so we never loop on a malformed reply
     say: typeof data.say === "string" ? data.say : "",
@@ -198,7 +276,10 @@ async function planActions({ imageBase64, mediaType = "image/png", command, imag
   // image's pixel size — no need to state dimensions.
   const dims =
     "\n\nFor any percentage click/scroll fallback, give xPct (0–100 from the left) and yPct (0–100 from the top), one decimal place, at the CENTER of the target." +
-    formatElements(elements);
+    formatElements(pruneElements(elements)) + // Phase 1 — only show actionable controls
+    // Phase 2 — last-line JSON discipline (prefill substitute; Sonnet 4.6 rejects
+    // assistant prefill). Ending the turn here forces the reply to be JSON-only.
+    '\n\nRespond with ONLY the JSON object and nothing else — no thinking, no preamble, no markdown. Your first character must be "{".';
 
   const userTurn = {
     role: "user",
@@ -220,6 +301,13 @@ async function planActions({ imageBase64, mediaType = "image/png", command, imag
         model: useModel,
         max_tokens: 1024,
         system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
+        // Phase 2 — token discipline WITHOUT prefill. Sonnet 4.6 rejects assistant
+        // message prefill ("the conversation must end with a user message"), so we
+        // can't seed a "{". Instead we (a) keep the budget from being wasted on a
+        // bloated element list via Phase-1 pruning, and (b) end the user turn with a
+        // hard "respond with ONLY the JSON object, starting with {" instruction (see
+        // `dims`), which is where this model takes its strongest formatting cue. The
+        // salvage parser stays as a safety net for the rare truncated tail.
         messages: [...history, userTurn],
       }),
     });
@@ -228,10 +316,17 @@ async function planActions({ imageBase64, mediaType = "image/png", command, imag
     // Take the TEXT block(s) — not content[0], which can be a "thinking" block
     // (adaptive thinking) and would leave us with no JSON.
     const text = (data.content || []).filter((c) => c && c.type === "text").map((c) => c.text || "").join("").trim();
-    return { ok: true, plan: parsePlan(text), raw: text };
+    const plan = parsePlan(text); // tolerant of truncation (recovers complete actions)
+    // The rare unrecoverable case (no JSON at all — e.g. the whole budget went to a
+    // thinking block); log it precisely instead of the vague fallback.
+    if (!text.includes("{")) {
+      console.warn(`[lazy-ai] control: no JSON in reply (stop_reason=${data.stop_reason}, textLen=${text.length})`);
+      if (data.stop_reason === "max_tokens") plan.say = "The reply was cut off — try again.";
+    }
+    return { ok: true, plan, raw: text };
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
   }
 }
 
-module.exports = { planActions, parsePlan, sanitizeActions, DEFAULT_CONTROL_MODEL };
+module.exports = { planActions, parsePlan, sanitizeActions, pruneElements, DEFAULT_CONTROL_MODEL };

@@ -18,6 +18,7 @@ const CONTROL_SCRIPT = path.join(__dirname, "control-action.ps1");
 const BATCH_SCRIPT = path.join(__dirname, "control-batch.ps1");
 const UIA_QUERY_SCRIPT = path.join(__dirname, "uia-query.ps1");
 const FOREGROUND_SCRIPT = path.join(__dirname, "foreground.ps1");
+const OCR_SCRIPT = path.join(__dirname, "ocr-lines.ps1");
 
 // Run a PowerShell script file, resolving with trimmed stdout.
 function runScript(scriptPath, args = [], timeoutMs = 5000) {
@@ -141,4 +142,28 @@ async function queryUiElements(excludeHwnd = 0, fallbackHwnd = 0, max = 80) {
   }
 }
 
-module.exports = { isWindows, grabSelection, focusAndPaste, performAction, performPlan, composeSendKeys, queryUiElements, getForegroundWindow };
+// Screen Teacher OCR (Sonnet line-snapping). Runs Windows.Media.Ocr over the PNG
+// we send the model and returns the text lines it found WITH their pixel boxes:
+//   [{ text, x, y, w, h }, ...]  (coords in the image's own pixels)
+// Sonnet can't place pixels well, so it points at a line by index from this list
+// and we snap the annotation to the real rect. Best-effort: returns [] off Windows
+// or on any failure, so the caller cleanly falls back to the model's pixel coords.
+async function ocrImage(pngBase64) {
+  if (!isWindows || !pngBase64) return [];
+  const file = path.join(os.tmpdir(), `lazy-ai-ocr-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
+  try {
+    await fs.promises.writeFile(file, Buffer.from(pngBase64, "base64"));
+    const out = await runScript(OCR_SCRIPT, ["-ImagePath", file], 12000);
+    const data = JSON.parse(out);
+    if (!Array.isArray(data)) return [];
+    return data.filter(
+      (l) => l && typeof l.text === "string" && [l.x, l.y, l.w, l.h].every((n) => Number.isFinite(n))
+    );
+  } catch {
+    return [];
+  } finally {
+    fs.promises.unlink(file).catch(() => {});
+  }
+}
+
+module.exports = { isWindows, grabSelection, focusAndPaste, performAction, performPlan, composeSendKeys, queryUiElements, getForegroundWindow, ocrImage };

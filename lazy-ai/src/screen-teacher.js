@@ -10,6 +10,20 @@
 // big screenshots to ~1568px — which is why main.js caps the screenshot to that
 // long edge before sending, keeping the AI's coordinates 1:1 with the canvas.
 //
+// NOTE: drawing coordinates are ABSOLUTE PIXELS (with the image dimensions stated
+// in the prompt) — a 2026-06-19 experiment porting them to percentages REGRESSED
+// accuracy on BOTH models (Opus included: it grounds best in the pixel frame it's
+// given, and sometimes emitted pixel-magnitude values into the % fields), so it
+// was reverted. Pixels are the proven path here.
+//
+// DEFAULT is Sonnet 4.6 (cost). To keep Sonnet accurate on CODE line-highlighting
+// (its known weak spot — drifting boxes), the prompt teaches a LINE-GRID method:
+// measure y0 (first line top) + lh (line height) once, then COMPUTE each line's
+// band arithmetically instead of eyeballing it, and emit a forgiving full-width
+// "highlight" band (rendered in overlay.js) rather than a tight floating box. This
+// is what makes "box the exact line being explained / the line an example refers
+// to" land reliably on Sonnet. Opus 4.7/4.8 stay available in Settings.
+//
 // Key is read from process.env (loaded by main.js, overridable in Settings).
 
 // Vision models the user can pick in Settings → Screen Teacher model.
@@ -22,7 +36,7 @@ const SCREEN_TEACHER_MODELS = {
   "claude-opus-4-8": { label: "Claude Opus 4.8 — most accurate", maxEdge: 2560 },
   "claude-sonnet-4-6": { label: "Claude Sonnet 4.6 — faster & cheaper", maxEdge: 1568 },
 };
-const DEFAULT_SCREEN_TEACHER_MODEL = "claude-opus-4-7";
+const DEFAULT_SCREEN_TEACHER_MODEL = "claude-sonnet-4-6";
 
 // Fall back to the default for an unknown id (e.g. a stale stored setting).
 function resolveModel(modelId) {
@@ -52,10 +66,23 @@ you reply with ONLY this JSON object and NOTHING else:
 - set "done": true when the task is fully complete, OR when the request was just an explanation with no further action needed.
 
 CODE & TECHNICAL step-by-step — when the screen shows code (an editor, a terminal, docs, a snippet on a web page) and the user wants it explained or walked through:
-- break the explanation into steps that follow the code, and for EACH step draw a box tightly around the EXACT line(s) of code that step is about (or an arrow to them) so the spoken sentence maps directly onto the implementation, line by line, like a video tutorial.
-- read line positions carefully so the box hugs just those line(s) and nothing else; one step per line or small logical group of lines.
-- keep "accumulate": false here — each step highlights its own line(s) and the previous box clears as the next appears — UNLESS the user must compare separate lines/blocks at once (then use true).
+- break the explanation into steps that follow the code, and for EACH step highlight the EXACT line(s) of code that step is about so the spoken sentence maps directly onto the implementation, line by line, like a video tutorial. one step per line or small logical group of lines.
+- use the "highlight" band (NOT a floating box) for code lines — it is your primary tool here and is far more forgiving than a tight box.
+- IF a "TEXT/CODE ON SCREEN" list of lines is provided below, point at code by copying its line text VERBATIM into "code" (and "codeTo" for a range) instead of pixel coordinates — that places the highlight exactly on the real line. use the grid method below only for code the list does NOT cover.
+
+  HOW TO LAND ON THE RIGHT LINE (this is the hard part — do it this way every time):
+  code editors lay every line on a FIXED vertical grid, so MEASURE the grid ONCE and then COMPUTE each line, never eyeball lines independently:
+    1. find y0 = the y-pixel of the TOP of the first visible code line.
+    2. find lh = the line height in pixels = the vertical distance from one line's top to the next line's top (read it off two adjacent lines; it is constant).
+    3. counting the first visible code line as line 1, line N spans y = y0 + (N-1)*lh  (top)  down to  y0 + N*lh.
+  to highlight line N: "highlight" with y = y0 + (N-1)*lh and h = lh. to highlight lines N..M: y = y0 + (N-1)*lh and h = (M-N+1)*lh.
+  for x/w: set x to the left edge of the code text and w to span the code column (you may extend to the right edge — a full-width band over the correct line still reads clearly even if x/w are loose). getting y and h right (via the grid) is what matters; that is where accuracy comes from.
+- keep "accumulate": false here — each step highlights its own line(s) and the previous band clears as the next appears — UNLESS the user must compare separate lines/blocks at once (then use true).
 - the same applies to other technical step-by-step breakdowns (config files, formulas, diagrams already on screen): map each spoken step to the precise element it describes.
+
+GIVING AN EXAMPLE that explains on-screen code (sample values, a worked trace, a simplified rewrite):
+- you MUST tie every example fragment to the exact on-screen line it illustrates. in the SAME step: "highlight" the line being explained AND place your example text with a "label" beside it (and optionally an "arrow" from the label to that line).
+- NEVER just stack example text off to the side with nothing connecting it to the code — an example that doesn't point at the line it explains is wrong. one example fragment ↔ one highlighted line, step by step.
 
 INTERACTIVE GUIDANCE — when the user asks "how do I…" or anything that takes several actions:
 - guide exactly ONE action at a time, using ONLY what is actually visible on the CURRENT screen. do NOT point at or describe things that are not on screen yet (e.g. an item inside a menu/dropdown that hasn't been opened) — you will see them after the user opens it.
@@ -65,6 +92,7 @@ INTERACTIVE GUIDANCE — when the user asks "how do I…" or anything that takes
 
 supported shapes (coordinates are PIXELS of the screenshot you were given, origin (0,0) at the TOP-LEFT):
 - {"shape":"arrow","from":[x,y],"to":[x,y],"label":"short text"}   point at something; label optional
+- {"shape":"highlight","x":x,"y":y,"w":width,"h":height,"label":"short text"}   a translucent band over a line (or line range) of code/text — your PRIMARY tool for highlighting code lines (see the grid method above); label optional
 - {"shape":"box","x":x,"y":y,"w":width,"h":height,"label":"short text"}   highlight a region; label optional
 - {"shape":"circle","x":cx,"y":cy,"r":radius,"label":"short text"}   circle a thing; label optional
 - {"shape":"line","from":[x,y],"to":[x,y]}   a plain line
@@ -155,13 +183,224 @@ function parseSteps(text) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// OCR line-snapping (Sonnet path). Sonnet 4.6 can READ which line of code/text it
+// wants to point at but can't estimate its pixel position (its boxes drift). So we
+// OCR the SAME image we send it (main.js → win-automation.ocrImage), show it the
+// lines, let it quote a line's VERBATIM text in "code", fuzzy-match that back to the
+// OCR rect, and snap the annotation onto the real line. The model never has to
+// guess coordinates — nor count line indexes (an earlier index-based version was
+// consistently ~2 visible lines off because the model miscounted against this
+// blank-stripped list). Opus 4.7/4.8 don't use this — they place pixels accurately.
+// ---------------------------------------------------------------------------
+const OCR_MAX_LINES = 160; // cap the list we show the model (token budget)
+
+// Build the "TEXT/CODE ON SCREEN" block appended to the user turn. We DON'T number
+// the lines: an earlier index-based version made the model count lines against this
+// blank-stripped list, which it did consistently wrong (off by ~2 visible lines
+// when a blank line sat between code lines). Instead the model copies a line's
+// VERBATIM text into "code" and we fuzzy-match it back to the OCR rect — immune to
+// miscounting. Showing OCR's exact spelling here lets the model copy text that
+// matches 1:1.
+function buildOcrPromptBlock(ocrLines) {
+  const list = ocrLines
+    .slice(0, OCR_MAX_LINES)
+    .map((l) => String(l.text).replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
+  return `\n\nTEXT ON SCREEN — an OCR pass read these exact pieces of text off the screenshot, each at a known location:
+${list}
+
+To point at ANYTHING on screen, anchor it to its nearest visible text — DO NOT guess pixel x/y (you are bad at that). Set "code" to one of the strings FROM THE LIST ABOVE — the one at or next to your target — copied character-for-character EXACTLY as written there, even if OCR misspelled it (e.g. if the list shows ".1ßErn" for "18 cm", use ".1ßErn"). That guarantees we can locate it. We then place the mark on that text, right beside the feature it labels:
+- a code line or sentence → its text:        {"shape":"highlight","code":"for i, n in enumerate(nums):","label":"optional caption"}
+- a block of lines →                          {"shape":"highlight","code":"<first line text>","codeTo":"<last line text>"}
+- a value / measurement / angle / variable on a DIAGRAM (its label IS the anchor) →
+      circle it:  {"shape":"circle","code":"34°","label":"angle"}        (anchors on the "34°" next to that angle)
+      arrow it:   {"shape":"arrow","code":"10 cm","label":"opposite side"}
+- a note beside a line →                       {"shape":"label","code":"diff = target - n","text":"diff = 9 - 2 = 7"}
+
+RULES:
+- "code"/"codeTo" must be LITERAL text shown on screen (that is how we locate it) — never a description. Put descriptions in "label" / notes in "text".
+- For a DIAGRAM (triangle, graph, shape): point at its LABELED parts — a side length, an angle value, a vertex letter — using their labels as "code". Do NOT draw a box around the whole figure, and do NOT invent a coordinate for an unlabeled point.
+- Only as a LAST resort, for a target with genuinely no nearby text (a bare icon), use raw pixel x/y.
+- If you cannot anchor a mark to nearby text and you are not certain of the exact pixel spot, DO NOT draw it — just describe that part in "say" with an empty "draw":[]. A missing annotation is fine; a misplaced one is not.`;
+}
+
+// Match key for comparing the model's quoted line against OCR text. We keep only
+// lowercase letters+digits — dropping ALL whitespace, punctuation and symbols —
+// because OCR mangles exactly those on diagrams/code (the degree sign in "34°" is
+// read as "340"; "print (foo (41))" gains spaces; a trailing ":" comes and goes).
+// Letters+digits survive far more reliably, so matching on them is robust.
+function normalizeLineText(s) {
+  return String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function bigrams(s) {
+  const out = [];
+  for (let i = 0; i < s.length - 1; i++) out.push(s.slice(i, i + 2));
+  return out;
+}
+
+// Sørensen–Dice bigram similarity (0–1) — robust to small OCR/transcription diffs.
+function diceSimilarity(a, b) {
+  if (a === b) return 1;
+  if (a.length < 2 || b.length < 2) return 0;
+  const A = bigrams(a);
+  const counts = new Map();
+  for (const g of A) counts.set(g, (counts.get(g) || 0) + 1);
+  let inter = 0;
+  const B = bigrams(b);
+  for (const g of B) {
+    const c = counts.get(g) || 0;
+    if (c > 0) { inter++; counts.set(g, c - 1); }
+  }
+  return (2 * inter) / (A.length + B.length);
+}
+
+// Index of the OCR line that best matches `query` text, or -1 if nothing clears
+// `minScore`. Exact (normalized) and substring matches win; otherwise the best
+// bigram similarity. `minScore` is the confidence floor: the explicit "code" path
+// uses the default (the model quoted the anchor on purpose); the label fallback
+// passes a high floor so a semantic caption like "angle" can't hijack a sentence
+// that merely contains the word.
+function bestOcrMatch(query, ocrLines, minScore = 0.5) {
+  const q = normalizeLineText(query);
+  if (q.length < 2) return -1;
+  let best = -1;
+  let bestScore = minScore;
+  for (let i = 0; i < ocrLines.length; i++) {
+    const t = normalizeLineText(ocrLines[i] && ocrLines[i].text);
+    if (t.length < 2) continue;
+    let score;
+    if (t === q) score = 1;
+    else if (t.includes(q) || q.includes(t)) score = 0.6 + 0.4 * (Math.min(q.length, t.length) / Math.max(q.length, t.length));
+    else score = diceSimilarity(q, t);
+    if (score > bestScore) { bestScore = score; best = i; }
+  }
+  return best;
+}
+
+// Resolve a shape's line reference to a pixel box. PRIMARY = verbatim text match
+// ("code", + "codeTo" for a range). FALLBACK = integer index ("line"/"lines") for
+// backward compatibility. Returns the union { x, y, w, h } or null if unresolvable.
+function rectForLineRef(shape, ocrLines) {
+  let idxs = [];
+
+  // Text-match path (preferred).
+  if (typeof shape.code === "string" && shape.code.trim()) {
+    const a = bestOcrMatch(shape.code, ocrLines);
+    if (a >= 0) {
+      if (typeof shape.codeTo === "string" && shape.codeTo.trim()) {
+        const b = bestOcrMatch(shape.codeTo, ocrLines);
+        if (b >= 0) {
+          const lo = Math.min(a, b);
+          const hi = Math.max(a, b);
+          for (let i = lo; i <= hi; i++) idxs.push(i);
+        } else idxs = [a];
+      } else idxs = [a];
+    }
+  }
+
+  // Index fallback.
+  if (!idxs.length && Number.isInteger(shape.line)) idxs = [shape.line];
+  if (!idxs.length && Array.isArray(shape.lines)) {
+    const nums = shape.lines.filter((n) => Number.isInteger(n));
+    if (nums.length) {
+      const lo = Math.min(...nums);
+      const hi = Math.max(...nums);
+      for (let i = lo; i <= hi; i++) idxs.push(i);
+    }
+  }
+
+  // Last resort: if a pointing shape gave no explicit ref but its label happens to
+  // BE the line's text (the model's older habit), match on that — but only at a
+  // high floor, so a semantic caption ("the loop", "angle") that merely shares a
+  // word with a line can't hijack it. It must essentially equal the line's text.
+  if (!idxs.length && shape.shape !== "label" && typeof shape.label === "string" && shape.label.trim()) {
+    const a = bestOcrMatch(shape.label, ocrLines, 0.82);
+    if (a >= 0) idxs = [a];
+  }
+
+  const rects = idxs.map((i) => ocrLines[i]).filter((r) => r && Number.isFinite(r.x));
+  if (!rects.length) return null;
+  const x = Math.min(...rects.map((r) => r.x));
+  const y = Math.min(...rects.map((r) => r.y));
+  const right = Math.max(...rects.map((r) => r.x + r.w));
+  const bottom = Math.max(...rects.map((r) => r.y + r.h));
+  return { x, y, w: right - x, h: bottom - y };
+}
+
+// Replace line-referenced shapes with concrete pixel shapes anchored on the OCR
+// rects. A shape that carries no resolvable line ref passes through unchanged (so
+// the model's raw-pixel fallback for textless targets still works).
+function resolveLineRefs(steps, ocrLines, imageWidth, imageHeight) {
+  if (!Array.isArray(ocrLines) || !ocrLines.length) return steps;
+  const padX = Math.max(6, Math.round((imageWidth || 1280) / 180));
+  const hasRef = (s) =>
+    (typeof s.code === "string" && s.code.trim()) || // verbatim text ref (primary)
+    Number.isInteger(s.line) ||
+    (Array.isArray(s.lines) && s.lines.some((n) => Number.isInteger(n))) ||
+    // a pointing shape whose label may be the line's code text (older model habit)
+    (s.shape !== "label" && typeof s.label === "string" && !!s.label.trim());
+
+  return steps.map((step) => ({
+    ...step,
+    draw: (step.draw || []).map((shape) => {
+      if (!hasRef(shape)) return shape;
+      const rect = rectForLineRef(shape, ocrLines);
+      if (!rect) {
+        // Unresolvable ref (e.g. a hallucinated index): keep only if the shape
+        // still carries usable pixel coords, otherwise drop it so the canvas never
+        // tries to draw a coordinate-less shape.
+        return Number.isFinite(shape.x) || Array.isArray(shape.from) ? shape : null;
+      }
+      const label = typeof shape.label === "string" && shape.label.trim() ? shape.label : undefined;
+      const cy = Math.round(rect.y + rect.h / 2);
+
+      if (shape.shape === "arrow" || shape.shape === "line") {
+        const reach = Math.round((imageWidth || 1280) / 12);
+        // Prefer a horizontal arrow into the line's left edge from the margin; but
+        // if the code hugs the left edge (no room), point down at it from above so
+        // the arrow is still long enough to read.
+        if (rect.x - padX > reach) {
+          const toX = rect.x - padX;
+          return { shape: "arrow", from: [toX - reach, cy], to: [toX, cy], ...(label ? { label } : {}) };
+        }
+        const cx = Math.round(rect.x + Math.min(rect.w / 2, rect.h * 1.5));
+        const toY = Math.max(2, rect.y - 2);
+        const fromY = Math.max(2, toY - Math.max(rect.h * 2, Math.round((imageHeight || 800) / 16)));
+        return { shape: "arrow", from: [cx, fromY], to: [cx, toY], ...(label ? { label } : {}) };
+      }
+      if (shape.shape === "circle") {
+        // Circle the whole label (use its larger half-dimension) so a short anchor
+        // like "34°" gets a clearly visible ring, not a dot.
+        return { shape: "circle", x: Math.round(rect.x + rect.w / 2), y: cy, r: Math.round(Math.max(rect.w, rect.h) / 2 + padX), ...(label ? { label } : {}) };
+      }
+      if (shape.shape === "label") {
+        // Example/note text glued just to the RIGHT of the line it explains.
+        return { shape: "label", x: rect.x + rect.w + padX, y: rect.y, text: String(shape.text || "") };
+      }
+      // default (highlight / box / anything else) → forgiving line band over the line(s)
+      const bandPad = 3;
+      return {
+        shape: "highlight",
+        x: Math.max(0, rect.x - padX),
+        y: Math.max(0, rect.y - bandPad),
+        w: rect.w + padX * 2,
+        h: rect.h + bandPad * 2,
+        ...(label ? { label } : {}),
+      };
+    }).filter(Boolean),
+  }));
+}
+
 // Ask the vision model about the current screen.
 //   question   — the user's goal (used as the prompt on the first turn).
 //   turnText   — overrides the prompt text on later guide turns ("the user acted…").
 //   history    — prior turns (Anthropic message objects, text-only) for guide mode.
 // Returns { ok, steps, explanation, done, raw }. `done:false` means the guide
 // loop should watch for the user to act, then call again with the new screen.
-async function askAboutScreen({ imageBase64, mediaType = "image/png", question, imageWidth, imageHeight, history = [], turnText = null, model }) {
+async function askAboutScreen({ imageBase64, mediaType = "image/png", question, imageWidth, imageHeight, history = [], turnText = null, model, ocrLines = [] }) {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) return { ok: false, error: "ANTHROPIC_API_KEY is missing — set it in Settings or .env" };
 
@@ -172,7 +411,11 @@ async function askAboutScreen({ imageBase64, mediaType = "image/png", question, 
     imageWidth && imageHeight
       ? `\n\nThe screenshot is exactly ${imageWidth}×${imageHeight} pixels (top-left is 0,0). Every coordinate you output must be an integer in that range: x in 0–${imageWidth}, y in 0–${imageHeight}.`
       : "";
-  const userText = base + dims;
+  // Sonnet path: hand it OCR'd lines + indexes so it points by INDEX (we snap to
+  // the real rect) instead of guessing pixels. Empty for Opus → unchanged behavior.
+  const useOcr = Array.isArray(ocrLines) && ocrLines.length > 0;
+  const ocrBlock = useOcr ? buildOcrPromptBlock(ocrLines) : "";
+  const userText = base + dims + ocrBlock;
 
   const userTurn = {
     role: "user",
@@ -204,8 +447,11 @@ async function askAboutScreen({ imageBase64, mediaType = "image/png", question, 
     const data = await res.json();
     // Take the TEXT block(s) — content[0] can be a "thinking" block (adaptive thinking).
     const text = (data.content || []).filter((c) => c && c.type === "text").map((c) => c.text || "").join("").trim();
-    const { steps, explanation, done, accumulate } = parseSteps(text);
-    return { ok: true, steps, explanation, done, accumulate, raw: text };
+    const parsed = parseSteps(text);
+    // Snap any line-referenced shapes onto the real OCR rects (Sonnet path); a
+    // no-op when ocrLines is empty (Opus) or the model used raw pixel coords.
+    const steps = useOcr ? resolveLineRefs(parsed.steps, ocrLines, imageWidth, imageHeight) : parsed.steps;
+    return { ok: true, steps, explanation: parsed.explanation, done: parsed.done, accumulate: parsed.accumulate, raw: text };
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
   }
@@ -263,6 +509,7 @@ module.exports = {
   cleanVoiceQuery,
   parseSteps,
   parseDrawInstructions,
+  resolveLineRefs,
   SCREEN_TEACHER_MODELS,
   DEFAULT_SCREEN_TEACHER_MODEL,
   maxEdgeFor,
