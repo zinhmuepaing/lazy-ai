@@ -23,18 +23,18 @@ PREFERRED — act on real UI ELEMENTS. each turn you're given a numbered list of
 - {"type":"ui_invoke","ref":12}                     activate element 12 — best for buttons, list items, contacts, menu items, tabs (e.g. a Play button, a contact row, Send).
 - {"type":"ui_type","ref":3,"text":"..."}           focus the editable element 3 and type into it — best for search boxes and message boxes ([editable] in the list).
 - {"type":"ui_click","ref":12}                      plain left-click at element 12's center (use only if ui_invoke isn't right).
-only fall back to the percentage "click" below when the target is genuinely NOT in the UI ELEMENTS list.
+only fall back to the pixel "click" below when the target is genuinely NOT in the UI ELEMENTS list.
 
 each <action> is one of:
 - {"type":"launch","app":"apple music"}             open/launch an app by its NAME (e.g. "notepad","word","apple music","spotify","microsoft teams","outlook"). works for normal AND Microsoft Store apps. this is THE way to open any app.
 - {"type":"press","keys":"ctrl+l"}                  press a key or combo. keys = a single key ("enter","tab","esc","a","/") or a combo with ctrl/alt/shift ("ctrl+l","ctrl+shift+p","alt+f4").
 - {"type":"text","text":"..."}                      type text into the focused field (via paste — any length, any characters).
 - {"type":"wait","ms":1500}                          pause for the UI to catch up. ALWAYS wait after launching an app (apps take ~1–2s to open) or opening a menu/page.
-- {"type":"scroll","xPct":50.0,"yPct":60.0,"amount":-600}   LAST RESORT. scroll at a point; amount NEGATIVE = down, POSITIVE = up.
-- {"type":"click","xPct":45.5,"yPct":50.0}          LAST RESORT. left-click a point — only when there is NO keyboard way and the target is VISIBLE now.
-- {"type":"doubleclick","xPct":..,"yPct":..} / {"type":"rightclick","xPct":..,"yPct":..}   LAST RESORT.
+- {"type":"scroll","x":640,"y":430,"amount":-600}   LAST RESORT. scroll at a pixel point; amount NEGATIVE = down, POSITIVE = up.
+- {"type":"click","x":512,"y":360}          LAST RESORT. left-click a pixel point — only when there is NO keyboard way and the target is VISIBLE now.
+- {"type":"doubleclick","x":..,"y":..} / {"type":"rightclick","x":..,"y":..}   LAST RESORT.
 
-COORDINATES ARE PERCENTAGES, NOT PIXELS. xPct = horizontal position as a percentage of the screen WIDTH from the left edge (0 = far left, 100 = far right). yPct = vertical position as a percentage of the screen HEIGHT from the top (0 = top, 100 = bottom). use one decimal place. aim for the exact CENTER of the target. example: a button in the middle of the screen is xPct 50, yPct 50; one in the top-right is around xPct 92, yPct 8.
+COORDINATES ARE PIXELS of the screenshot you are given (top-left is 0,0). x = pixels from the LEFT edge, y = pixels from the TOP. give INTEGERS at the exact CENTER of the target. the user message states the exact image size; x must be 0–width and y 0–height. read the position carefully off the image, as if you were clicking it yourself — aim dead-center on the control.
 
 NEVER use click/scroll for any of these — there is always a keyboard way:
 - opening an app  → use "launch" (never click a desktop/taskbar/Start icon). BUT if the app is ALREADY open (its window or its controls already appear in the UI ELEMENTS / screenshot), do NOT launch it again — just continue from the current state.
@@ -60,10 +60,10 @@ CRITICAL accuracy rules (these caused real failures):
 
 recipe for "find <person/item> and <do something>" (e.g. Teams/Outlook) — aim for ~3 turns:
   turn 1 (batch open + search in ONE turn): {"done":false,"actions":[{"type":"launch","app":"microsoft teams"},{"type":"wait","ms":2000},{"type":"press","keys":"ctrl+e"},{"type":"text","text":"<name only>"},{"type":"wait","ms":1200}]} → LOOK at the results
-  turn 2 (select): prefer {"type":"ui_invoke","ref":N} on the contact's element (the "list item"/"tree item" with the person's name — NOT the search box or a filter chip); fall back to a percentage click only if it's not listed → "done":false → LOOK (did the chat open?)
+  turn 2 (select): prefer {"type":"ui_invoke","ref":N} on the contact's element (the "list item"/"tree item" with the person's name — NOT the search box or a filter chip); fall back to a pixel click only if it's not listed → "done":false → LOOK (did the chat open?)
   turn 3 (act): {"type":"ui_type","ref":N,"text":"<message>"} into the message-box element, then {"type":"ui_invoke","ref":M} on the Send button (or {"type":"press","keys":"enter"}) → "done":true
 
-- "click"/"scroll" coordinates are PIXELS of the CURRENT screenshot; precise CENTER of the target; only for things visible NOW.
+- "click"/"scroll" coordinates are integer PIXELS of the CURRENT screenshot; precise CENTER of the target; only for things visible NOW.
 - if nothing is possible/safe, return "actions":[] with "done":true and explain in "say".
 
 worked examples:
@@ -128,7 +128,7 @@ function formatElements(elements) {
   });
   return (
     "\n\nUI ELEMENTS on screen (use ui_invoke / ui_type / ui_click with the ref number; " +
-    "if your target isn't here, fall back to a percentage click):\n" +
+    "if your target isn't here, fall back to a pixel click):\n" +
     lines.join("\n")
   );
 }
@@ -178,11 +178,11 @@ function salvageJson(text) {
   return { json: out, stringCut };
 }
 
-// Clamp a percentage (0–100) to a safe number; accepts "45.5%" or 45.5.
-function clampPct(v) {
-  const n = Number(String(v ?? "").replace("%", ""));
-  if (!Number.isFinite(n)) return 0;
-  return Math.min(100, Math.max(0, n));
+// Coerce a coordinate to a safe non-negative integer pixel (the model returns
+// pixels in the screenshot frame now; main.js scales them to the physical screen).
+function toPx(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
 }
 
 // Keep only well-formed actions, coercing fields to safe types. Anything unknown
@@ -206,12 +206,12 @@ function sanitizeActions(raw) {
         out.push({ type: "wait", ms: Math.min(8000, Math.max(0, Number(a.ms) || 0)) });
         break;
       case "scroll":
-        out.push({ type: "scroll", xPct: clampPct(a.xPct), yPct: clampPct(a.yPct), amount: Number(a.amount) || 0 });
+        out.push({ type: "scroll", x: toPx(a.x), y: toPx(a.y), amount: Number(a.amount) || 0 });
         break;
       case "click":
       case "doubleclick":
       case "rightclick":
-        out.push({ type: a.type, xPct: clampPct(a.xPct), yPct: clampPct(a.yPct) });
+        out.push({ type: a.type, x: toPx(a.x), y: toPx(a.y) });
         break;
       case "ui_invoke":
       case "ui_click":
@@ -272,20 +272,27 @@ async function planActions({ imageBase64, mediaType = "image/png", command, imag
 
   const base = turnText ?? `Goal: ${(command || "").trim()}`;
   if (!base.trim()) return { ok: false, error: "No command given." };
-  // Coordinates are percentages of the screen, so they're independent of the
-  // image's pixel size — no need to state dimensions.
+  // State the EXACT image size so the model's pixel coords land in the same frame
+  // main.js maps back to the screen. This is the fix that made Screen Teacher
+  // accurate on Sonnet — the model was trained to emit pixels, not percentages.
+  const sizeNote =
+    imageWidth && imageHeight
+      ? `The screenshot is exactly ${imageWidth}×${imageHeight} pixels (top-left is 0,0). For any click/scroll fallback, give integer x,y pixels at the exact CENTER of the target: x in 0–${imageWidth}, y in 0–${imageHeight}.`
+      : "For any click/scroll fallback, give integer x,y pixels at the exact CENTER of the target.";
   const dims =
-    "\n\nFor any percentage click/scroll fallback, give xPct (0–100 from the left) and yPct (0–100 from the top), one decimal place, at the CENTER of the target." +
+    "\n\n" + sizeNote +
     formatElements(pruneElements(elements)) + // Phase 1 — only show actionable controls
     // Phase 2 — last-line JSON discipline (prefill substitute; Sonnet 4.6 rejects
     // assistant prefill). Ending the turn here forces the reply to be JSON-only.
     '\n\nRespond with ONLY the JSON object and nothing else — no thinking, no preamble, no markdown. Your first character must be "{".';
 
+  // Text BEFORE image — per Anthropic's computer-use guidance this lets the model
+  // read the goal/elements first and improves click accuracy.
   const userTurn = {
     role: "user",
     content: [
-      { type: "image", source: { type: "base64", media_type: mediaType, data: imageBase64 } },
       { type: "text", text: base + dims },
+      { type: "image", source: { type: "base64", media_type: mediaType, data: imageBase64 } },
     ],
   };
 

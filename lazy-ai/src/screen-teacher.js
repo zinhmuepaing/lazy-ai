@@ -27,14 +27,20 @@
 // Key is read from process.env (loaded by main.js, overridable in Settings).
 
 // Vision models the user can pick in Settings → Screen Teacher model.
-// `maxEdge` is the long-edge px we cap the screenshot to before sending: Opus
-// 4.7/4.8 have high-resolution vision (pixel-accurate to ~2560px); Sonnet 4.6 is
-// prior-generation, so the API downscales big images to ~1568px — capping there
-// keeps the AI's coordinates 1:1 with the overlay canvas.
+// We cap the screenshot to BOTH a long-edge limit (`maxEdge`) AND a MEGAPIXEL
+// limit (`maxPixels`) before sending. The megapixel cap is the one the API
+// actually enforces: per Anthropic's computer-use guidance the Sonnet 4.6 family
+// silently downscales anything over ~1.15 MP, after which the model's coordinates
+// no longer match the dimensions we report (imageWidth/imageHeight) — the #1 cause
+// of coordinate drift. So we stay just under the limit (Sonnet ~1.1 MP ≈ 1.28k×0.86k;
+// Opus has a larger 3.75 MP budget). Long-edge alone was NOT enough: 1568×882 on a
+// 16:9 screen is 1.38 MP — over the Sonnet cap — which is exactly why pixel-coord
+// annotations drifted. Keeping under the cap makes the sent image 1:1 with the
+// frame we tell the model about, and with the overlay canvas.
 const SCREEN_TEACHER_MODELS = {
-  "claude-opus-4-7": { label: "Claude Opus 4.7 — most accurate", maxEdge: 2560 },
-  "claude-opus-4-8": { label: "Claude Opus 4.8 — most accurate", maxEdge: 2560 },
-  "claude-sonnet-4-6": { label: "Claude Sonnet 4.6 — faster & cheaper", maxEdge: 1568 },
+  "claude-opus-4-7": { label: "Claude Opus 4.7 — most accurate", maxEdge: 2560, maxPixels: 3_600_000 },
+  "claude-opus-4-8": { label: "Claude Opus 4.8 — most accurate", maxEdge: 2560, maxPixels: 3_600_000 },
+  "claude-sonnet-4-6": { label: "Claude Sonnet 4.6 — faster & cheaper", maxEdge: 1568, maxPixels: 1_100_000 },
 };
 const DEFAULT_SCREEN_TEACHER_MODEL = "claude-sonnet-4-6";
 
@@ -44,6 +50,9 @@ function resolveModel(modelId) {
 }
 function maxEdgeFor(modelId) {
   return SCREEN_TEACHER_MODELS[resolveModel(modelId)].maxEdge;
+}
+function maxPixelsFor(modelId) {
+  return SCREEN_TEACHER_MODELS[resolveModel(modelId)].maxPixels;
 }
 
 const SYSTEM_PROMPT = `you are Screen Teacher, an assistant that looks at a screenshot of the user's screen and teaches them like a narrated, animated explainer — and, for step-by-step tasks, GUIDES them one action at a time, following along as they act.
@@ -426,11 +435,13 @@ async function askAboutScreen({ imageBase64, mediaType = "image/png", question, 
   const ocrBlock = useOcr ? buildOcrPromptBlock(ocrLines) : "";
   const userText = base + dims + ocrBlock;
 
+  // Text BEFORE image — per Anthropic's computer-use guidance this lets the model
+  // read the target/instructions first and improves coordinate accuracy.
   const userTurn = {
     role: "user",
     content: [
-      { type: "image", source: { type: "base64", media_type: mediaType, data: imageBase64 } },
       { type: "text", text: userText },
+      { type: "image", source: { type: "base64", media_type: mediaType, data: imageBase64 } },
     ],
   };
 
@@ -522,4 +533,5 @@ module.exports = {
   SCREEN_TEACHER_MODELS,
   DEFAULT_SCREEN_TEACHER_MODEL,
   maxEdgeFor,
+  maxPixelsFor,
 };

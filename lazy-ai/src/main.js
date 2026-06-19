@@ -124,9 +124,13 @@ function controlModel() {
   return screenControl.DEFAULT_CONTROL_MODEL;
 }
 
-// The screenshot long-edge cap for the model that will consume the capture.
+// The screenshot caps for the model that will consume the capture (long edge AND
+// megapixels — both registered per model in screen-teacher.js).
 function maxEdgeForModel(model) {
   return screenTeacher.maxEdgeFor(model);
+}
+function maxPixelsForModel(model) {
+  return screenTeacher.maxPixelsFor(model);
 }
 
 const GUIDE_MAX_TURNS = 14; // safety cap so a misbehaving loop can't run forever
@@ -487,12 +491,14 @@ function currentDisplay() {
   return activeDisplay || screen.getPrimaryDisplay();
 }
 
-// Capture the active display. `maxLongEdge` MUST be the vision limit of the model
-// that will actually process this image — if the image is larger than the model's
-// limit, the API silently downscales it and the model's coordinates no longer
-// match the dimensions we report, so clicks/annotations drift. (This is why
-// Screen Control on Sonnet/1568 drifted while it was capped to Opus/2560.)
-async function captureScreen(maxLongEdge) {
+// Capture the active display, sized for the consuming model. We fit BOTH a
+// long-edge cap AND a MEGAPIXEL cap — the megapixel one is what the API actually
+// enforces (per Anthropic's computer-use guidance): exceed it and the API silently
+// downscales, so the model's coordinates no longer match the dimensions we report
+// and clicks/annotations drift. Long-edge alone wasn't enough (1568×882 = 1.38 MP
+// is OVER the Sonnet ~1.15 MP cap). The overlay sizes its canvas to the returned
+// dimensions, so coordinates stay 1:1.
+async function captureScreen(maxLongEdge, maxPixels) {
   const display = currentDisplay();
   const { width, height } = display.size; // CSS pixels
   const scaleFactor = display.scaleFactor || 1;
@@ -510,18 +516,24 @@ async function captureScreen(maxLongEdge) {
   let image = source.thumbnail;
   let size = image.getSize();
 
-  // Cap the long edge to the consuming model's limit so the API doesn't re-downscale.
-  // The overlay sizes its canvas to these dimensions, so coordinates stay 1:1.
   const MAX_LONG_EDGE = maxLongEdge || screenTeacher.maxEdgeFor(activeScreenTeacherModel());
+  const MAX_PIXELS = maxPixels || screenTeacher.maxPixelsFor(activeScreenTeacherModel());
   const longEdge = Math.max(size.width, size.height);
-  if (longEdge > MAX_LONG_EDGE) {
-    const scale = MAX_LONG_EDGE / longEdge;
+  const pixels = size.width * size.height;
+  // Take the smaller of the two scales so we satisfy whichever limit binds first.
+  let scale = 1;
+  if (MAX_LONG_EDGE && longEdge > MAX_LONG_EDGE) scale = Math.min(scale, MAX_LONG_EDGE / longEdge);
+  if (MAX_PIXELS && pixels > MAX_PIXELS) scale = Math.min(scale, Math.sqrt(MAX_PIXELS / pixels));
+  if (scale < 1) {
     image = image.resize({
       width: Math.round(size.width * scale),
       height: Math.round(size.height * scale),
     });
     size = image.getSize();
   }
+  // Diagnostic: the sent dims must equal what we tell the model. If the API still
+  // downscales, these would mismatch and coords would drift — log so we can spot it.
+  console.log(`[lazy-ai] capture sent ${size.width}×${size.height} (${(size.width * size.height / 1e6).toFixed(2)} MP, cap ${(MAX_PIXELS / 1e6).toFixed(2)} MP)`);
 
   return {
     base64: image.toPNG().toString("base64"),
@@ -595,7 +607,7 @@ async function summonOverlay(mode) {
   // teach → the Settings model) so its coordinates map 1:1.
   const captureModel = mode === "control" ? controlModel() : activeScreenTeacherModel();
   try {
-    lastScreenshot = await captureScreen(maxEdgeForModel(captureModel));
+    lastScreenshot = await captureScreen(maxEdgeForModel(captureModel), maxPixelsForModel(captureModel));
   } catch (err) {
     console.error(`[lazy-ai] Screenshot failed: ${err.message}`);
     return;
@@ -798,7 +810,7 @@ async function runGuideTurn({ useExistingShot }) {
       shot = lastScreenshot;
     } else {
       overlayWindow.webContents.send("overlay-clear"); // wipe the old pointer while we think
-      shot = await captureScreen(maxEdgeForModel(activeScreenTeacherModel()));
+      shot = await captureScreen(maxEdgeForModel(activeScreenTeacherModel()), maxPixelsForModel(activeScreenTeacherModel()));
       lastScreenshot = shot;
     }
   } catch (err) {
@@ -925,9 +937,13 @@ function isMessagingGoal(goal) {
 // and DROP an unsafe ui_type so the loop re-plans rather than dumping the message
 // into the wrong field. Dropping (not redirecting) keeps it honest — we never
 // silently retarget the model's ref; we just refuse the obviously-wrong one.
-function resolvePlan(actions, elements, goal) {
+function resolvePlan(actions, elements, goal, imageWidth, imageHeight) {
   const byRef = (ref) => (Array.isArray(elements) ? elements.find((e) => e.idx === ref) : null);
   const messaging = isMessagingGoal(goal);
+  // Model click/scroll coords are PIXELS in the screenshot frame (W×H). Convert to a
+  // 0–1 fraction of the display, then to physical px (DPI/multi-monitor accurate).
+  const W = imageWidth || (lastScreenshot && lastScreenshot.width) || 1;
+  const H = imageHeight || (lastScreenshot && lastScreenshot.height) || 1;
   const resolved = [];
   for (const a of actions) {
     if (a.type === "launch") resolved.push({ type: "launch", app: a.app });
@@ -935,10 +951,10 @@ function resolvePlan(actions, elements, goal) {
     else if (a.type === "text") resolved.push({ type: "text", text: a.text });
     else if (a.type === "wait") resolved.push({ type: "wait", ms: a.ms });
     else if (a.type === "scroll") {
-      const p = fractionToPhysical(a.xPct / 100, a.yPct / 100);
+      const p = fractionToPhysical(a.x / W, a.y / H);
       resolved.push({ type: "scroll", x: p.x, y: p.y, amount: a.amount });
     } else if (a.type === "click" || a.type === "doubleclick" || a.type === "rightclick") {
-      const p = fractionToPhysical(a.xPct / 100, a.yPct / 100);
+      const p = fractionToPhysical(a.x / W, a.y / H);
       resolved.push({ type: a.type, x: p.x, y: p.y });
     } else if (a.type === "ui_invoke" || a.type === "ui_click" || a.type === "ui_type") {
       const el = byRef(a.ref);
@@ -990,7 +1006,7 @@ async function controlTurn({ useExistingShot }) {
     // Query uses the live foreground, falling back to the known target window so
     // an already-open app is seen even while our overlay is foreground.
     const [s, ui] = await Promise.all([
-      useExistingShot && lastScreenshot ? Promise.resolve(lastScreenshot) : captureScreen(maxEdgeForModel(controlModel())),
+      useExistingShot && lastScreenshot ? Promise.resolve(lastScreenshot) : captureScreen(maxEdgeForModel(controlModel()), maxPixelsForModel(controlModel())),
       winAutomation.queryUiElements(overlayHwnd(), controlTargetHwnd, 80),
     ]);
     shot = s;
@@ -1057,7 +1073,8 @@ async function controlTurn({ useExistingShot }) {
   const draw = [];
   for (const a of plan.actions) {
     if (SPATIAL_TYPES.includes(a.type)) {
-      draw.push({ shape: "circle", x: Math.round((a.xPct / 100) * shot.width), y: Math.round((a.yPct / 100) * shot.height), r, label: a.type });
+      // a.x/a.y are already pixels in the screenshot frame = overlay-canvas space.
+      draw.push({ shape: "circle", x: Math.round(a.x), y: Math.round(a.y), r, label: a.type });
     } else if (a.type === "ui_invoke" || a.type === "ui_click" || a.type === "ui_type") {
       const el = controlElements.find((e) => e.idx === a.ref);
       if (el) {
@@ -1074,7 +1091,7 @@ async function controlTurn({ useExistingShot }) {
     imageHeight: shot.height,
   });
 
-  const resolved = resolvePlan(plan.actions, controlElements, controlGoal);
+  const resolved = resolvePlan(plan.actions, controlElements, controlGoal, shot.width, shot.height);
   const targetHwnd = controlTargetHwnd;
   controlTimer = setTimeout(async () => {
     controlTimer = null;
