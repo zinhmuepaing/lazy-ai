@@ -31,7 +31,7 @@ rules:
 - if the user attached a reference document, use it as context the target AI should consider — summarize or reference it appropriately rather than dumping it verbatim.
 - output ONLY the rewritten prompt. no preamble, no explanation, no "here's your prompt", no surrounding quotes or code fences.`;
 
-function buildUserMessage({ promptText, context, fileName, fileText }) {
+function buildUserMessage({ promptText, context, fileName, fileText, fileImage }) {
   let msg = `Rewrite this prompt:\n\n${(promptText || "").trim()}`;
   if (context && context.trim()) {
     msg += `\n\n--- Extra context / desired style ---\n${context.trim()}`;
@@ -39,15 +39,27 @@ function buildUserMessage({ promptText, context, fileName, fileText }) {
   if (fileText && fileText.trim()) {
     msg += `\n\n--- Attached reference file: ${fileName || "document"} ---\n${fileText.trim()}`;
   }
+  if (fileImage) {
+    msg += `\n\n--- Attached reference image: ${fileName || "image"} ---\n(consider the attached image as context for the rewrite)`;
+  }
   return msg;
 }
 
 // ---------------------------------------------------------------------------
 // Provider calls. Node 18+ has a global fetch.
 // ---------------------------------------------------------------------------
-async function callAnthropic(apiModel, userMessage) {
+async function callAnthropic(apiModel, userMessage, image) {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) throw new Error("ANTHROPIC_API_KEY is missing from .env");
+
+  // Anthropic accepts content as a plain string or, for vision, an array of
+  // text + image blocks.
+  const content = image
+    ? [
+        { type: "text", text: userMessage },
+        { type: "image", source: { type: "base64", media_type: image.mediaType, data: image.base64 } },
+      ]
+    : userMessage;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -60,7 +72,7 @@ async function callAnthropic(apiModel, userMessage) {
       model: apiModel,
       max_tokens: 1024,
       system: POLISH_SYSTEM_PROMPT,
-      messages: [{ role: "user", content: userMessage }],
+      messages: [{ role: "user", content }],
     }),
   });
 
@@ -70,9 +82,13 @@ async function callAnthropic(apiModel, userMessage) {
   return (data.content || []).filter((c) => c && c.type === "text").map((c) => c.text || "").join("").trim();
 }
 
-async function callGemini(apiModel, userMessage) {
+async function callGemini(apiModel, userMessage, image) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("GEMINI_API_KEY is missing from .env");
+
+  const parts = image
+    ? [{ text: userMessage }, { inline_data: { mime_type: image.mediaType, data: image.base64 } }]
+    : [{ text: userMessage }];
 
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/${apiModel}:generateContent?key=${key}`;
@@ -81,7 +97,7 @@ async function callGemini(apiModel, userMessage) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: POLISH_SYSTEM_PROMPT }] },
-      contents: [{ role: "user", parts: [{ text: userMessage }] }],
+      contents: [{ role: "user", parts }],
     }),
   });
 
@@ -90,9 +106,18 @@ async function callGemini(apiModel, userMessage) {
   return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
 }
 
-async function callOpenAI(apiModel, userMessage) {
+async function callOpenAI(apiModel, userMessage, image) {
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw new Error("OPENAI_API_KEY is missing from .env");
+
+  // For vision, OpenAI takes the user content as an array of text + image_url
+  // (a data: URL) parts.
+  const userContent = image
+    ? [
+        { type: "text", text: userMessage },
+        { type: "image_url", image_url: { url: `data:${image.mediaType};base64,${image.base64}` } },
+      ]
+    : userMessage;
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -104,7 +129,7 @@ async function callOpenAI(apiModel, userMessage) {
       model: apiModel,
       messages: [
         { role: "system", content: POLISH_SYSTEM_PROMPT },
-        { role: "user", content: userMessage },
+        { role: "user", content: userContent },
       ],
     }),
   });
@@ -120,11 +145,12 @@ async function callOpenAI(apiModel, userMessage) {
 async function polish(payload) {
   const model = MODELS[payload?.modelId] || MODELS[DEFAULT_MODEL];
   const userMessage = buildUserMessage(payload || {});
+  const image = payload?.fileImage; // { base64, mediaType } | undefined (vision)
   try {
     let text;
-    if (model.provider === "anthropic") text = await callAnthropic(model.apiModel, userMessage);
-    else if (model.provider === "gemini") text = await callGemini(model.apiModel, userMessage);
-    else if (model.provider === "openai") text = await callOpenAI(model.apiModel, userMessage);
+    if (model.provider === "anthropic") text = await callAnthropic(model.apiModel, userMessage, image);
+    else if (model.provider === "gemini") text = await callGemini(model.apiModel, userMessage, image);
+    else if (model.provider === "openai") text = await callOpenAI(model.apiModel, userMessage, image);
     else throw new Error(`Unknown provider for model ${payload?.modelId}`);
     return { ok: true, text };
   } catch (err) {
@@ -157,9 +183,33 @@ async function extractTextFromFile(filePath) {
   throw new Error(`Unsupported file type: ${ext}`);
 }
 
+// Image attachments (for vision). Maps extension → MIME media type.
+const IMAGE_MEDIA_TYPES = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".bmp": "image/bmp",
+};
+
+// Read an attachment as either extracted text (docs/code) or a base64 image
+// (for vision). Returns { text } or { image: { base64, mediaType } }.
+async function extractAttachment(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const mediaType = IMAGE_MEDIA_TYPES[ext];
+  if (mediaType) {
+    const base64 = fs.readFileSync(filePath).toString("base64");
+    return { image: { base64, mediaType } };
+  }
+  return { text: await extractTextFromFile(filePath) };
+}
+
 module.exports = {
   MODELS,
   DEFAULT_MODEL,
   polish,
   extractTextFromFile,
+  extractAttachment,
+  IMAGE_MEDIA_TYPES,
 };

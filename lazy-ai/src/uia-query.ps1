@@ -19,6 +19,7 @@ using System.Runtime.InteropServices;
 public static class Fg {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
   [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 }
@@ -38,9 +39,31 @@ $ValueP = [System.Windows.Automation.ValuePattern]::Pattern
 
 $root = $A::FromHandle($h)
 
-# Chromium/Edge keep their accessibility tree OFF until a UIA client asks for it.
-# For a browser window, do a throwaway query to trigger it, wait, then proceed,
-# so web-page elements (links/buttons) show up instead of just the browser chrome.
+# Identify the owning process. We treat real WEB BROWSERS differently from Electron/
+# WebView2 DESKTOP apps (Teams, Slack, VS Code, Claude) — both use the
+# "Chrome_WidgetWin"/"WebView" window class, so the class alone can't tell them apart.
+$wpid = [uint32]0
+[void][Fg]::GetWindowThreadProcessId($h, [ref]$wpid)
+$pname = ""
+try { $pname = (Get-Process -Id ([int]$wpid) -ErrorAction Stop).ProcessName.ToLower() } catch {}
+$isBrowser = $pname -match '^(chrome|msedge|firefox|brave|opera|vivaldi|chromium|iexplore|librewolf|waterfox)$'
+
+# REAL BROWSER: do NOT harvest the web-page a11y tree. Those element rects go stale
+# between this query and the click (the page scrolls / re-renders), and feeding them
+# lures the model into flaky ui_* actions instead of the reliable keyboard path
+# (ctrl+l -> type the URL/query -> enter) plus a vision click. That asymmetry is
+# exactly why Screen Control worked when summoned over ANOTHER app (the browser's
+# elements were never seen) but failed when summoned ON the browser. Return no
+# elements so both cases behave the same. (Electron/WebView2 desktop apps below still
+# get the a11y wake — their whole UI lives in that tree and its rects are stable.)
+if ($isBrowser) {
+  Write-Output ('{"hwnd":' + [long]$h + ',"elements":[]}')
+  exit 0
+}
+
+# Chromium/Edge/WebView DESKTOP apps keep their accessibility tree OFF until a UIA
+# client asks for it. Do a throwaway query to trigger it, wait, then proceed, so the
+# app's controls (contact rows, message box, buttons) show up instead of nothing.
 $cn = New-Object System.Text.StringBuilder 256
 [void][Fg]::GetClassName($h, $cn, $cn.Capacity)
 if ($cn.ToString() -match "Chrome_WidgetWin|Edge|WebView") {

@@ -15,9 +15,18 @@
     <div id="bar" class="liquid-glass">
       <span class="bar-title">Screen<b>Teacher</b></span>
       <input id="question" type="text" placeholder="ask about what's on your screen… (Enter to ask, Esc to close)" />
-      <button id="micBtn" class="ghost" title="Click to speak your question">🎤</button>
-      <button id="askBtn" class="primary">Ask</button>
-      <button id="closeBtn" class="close-btn" title="Close (Esc)">✕</button>
+      <!-- Mic (lucide): swaps to a black stop-square while recording via .recording -->
+      <button id="micBtn" class="icon-btn" title="Click to speak your question" aria-label="Speak">
+        <svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>
+        <svg class="stop-icon" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
+      </button>
+      <!-- Send (lucide): the primary action — "Ask" (Teacher) / "Do it" (Control) -->
+      <button id="askBtn" class="send-btn" title="Ask" aria-label="Send">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></svg>
+      </button>
+      <button id="closeBtn" class="icon-btn close-btn" title="Close (Esc)" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+      </button>
     </div>
 
     <!-- Floating status: plain centered text (no box, so it never covers an app's

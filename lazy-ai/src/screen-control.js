@@ -9,7 +9,7 @@
 // Defaults to Claude Sonnet 4.6 — fast/cheap and plenty for action planning
 // (keyboard actions don't need pixel-precise vision). Key from process.env.
 
-const DEFAULT_CONTROL_MODEL = "youtube.com/results?search_query=perfect+ed+sheeran";
+const DEFAULT_CONTROL_MODEL = "claude-sonnet-4-6";
 
 const SYSTEM_PROMPT = `you are Screen Control. you carry out a user's command on a Windows PC by producing a PLAN of input actions.
 

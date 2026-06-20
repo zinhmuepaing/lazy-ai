@@ -27,7 +27,7 @@ const {
 // Load .env from the project root (one level up from src/).
 require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
-const { MODELS, DEFAULT_MODEL, polish, extractTextFromFile } = require("./polish-engine");
+const { MODELS, DEFAULT_MODEL, polish, extractTextFromFile, extractAttachment } = require("./polish-engine");
 const { startLocalServer } = require("./local-server");
 const winAutomation = require("./win-automation");
 const settingsStore = require("./settings-store");
@@ -202,17 +202,22 @@ ipcMain.handle("save-settings", (_event, payload) => {
 });
 
 ipcMain.handle("pick-file", async () => {
+  const docExts = ["txt", "md", "pdf", "docx", "js", "ts", "py", "json", "html", "css", "java", "c", "cpp", "cs", "go", "rs", "rb", "php", "swift", "csv", "yml", "yaml", "xml"];
+  const imageExts = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
     properties: ["openFile"],
     filters: [
-      { name: "Documents & code", extensions: ["txt", "md", "pdf", "docx", "js", "ts", "py", "json", "html", "css", "java", "c", "cpp", "cs", "go", "rs", "rb", "php", "swift", "csv", "yml", "yaml", "xml"] },
+      { name: "Documents, code & images", extensions: [...docExts, ...imageExts] },
+      { name: "Images", extensions: imageExts },
+      { name: "Documents & code", extensions: docExts },
     ],
   });
   if (canceled || filePaths.length === 0) return null;
   const filePath = filePaths[0];
   try {
-    const text = await extractTextFromFile(filePath);
-    return { name: path.basename(filePath), text };
+    // Returns { text } for docs/code or { image: { base64, mediaType } } for images.
+    const attachment = await extractAttachment(filePath);
+    return { name: path.basename(filePath), ...attachment };
   } catch (err) {
     return { name: path.basename(filePath), error: String(err.message || err) };
   }
@@ -288,6 +293,8 @@ function createWindow() {
     height: 640,
     show: false,
     frame: false,
+    transparent: true, // see-through window so the glass cards frost the live desktop
+    backgroundColor: "#00000000",
     resizable: true,
     skipTaskbar: true,
     alwaysOnTop: true,
@@ -1187,6 +1194,16 @@ async function controlTurn({ useExistingShot }) {
   const targetHwnd = controlTargetHwnd;
   controlTimer = setTimeout(async () => {
     controlTimer = null;
+    if (!controlActive) return;
+    // Relinquish the overlay's foreground BEFORE the batch types. The overlay is an
+    // always-on-top window that just held keyboard focus (the user typed the command
+    // into its bar); if it keeps the foreground, the batch's first keystroke can land
+    // in the overlay instead of the target app — the "URL gets appended into our input
+    // bar" bug seen when summoning ON the target (Chrome) where the plan has no leading
+    // launch/wait to let focus settle. Blurring hands the foreground back to the app
+    // underneath; control-batch then force-focuses + verifies the real target anyway.
+    try { overlayWindow.blur(); } catch {}
+    await delay(120);
     if (!controlActive) return;
     try {
       await winAutomation.performPlan(resolved, planTimeoutMs(plan.actions), targetHwnd, overlayHwnd());

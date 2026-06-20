@@ -7,47 +7,92 @@
     <title>Lazy AI</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
-  <body>
-    <header>
-      <div class="title-block">
-        <h1>Lazy<span>AI</span></h1>
-        <p class="tagline">paste a messy prompt — get a clean one back</p>
-      </div>
-      <button id="closeBtn" class="close-btn" title="Close (Esc)">✕</button>
-    </header>
-
-    <main>
-      <label class="field-label" for="prompt">Your prompt</label>
-      <textarea id="prompt" rows="7" placeholder="type or paste your rough prompt here..."></textarea>
-
-      <label class="field-label" for="context">Context / style <span class="optional">(optional)</span></label>
-      <input id="context" type="text" placeholder="e.g. write like a senior dev · output as a table · I'm a beginner" />
-
-      <div class="row">
-        <div class="file-area">
-          <button id="fileBtn" class="ghost">📎 Attach file</button>
-          <span id="fileName" class="file-name"></span>
-        </div>
-
-        <div class="model-area">
-          <label class="field-label inline" for="model">Model</label>
-          <select id="model"></select>
-        </div>
+  <body class="glass-window">
+    <div class="app">
+      <!-- Drag handle + close -->
+      <div class="topbar">
+        <button id="closeBtn" class="icon-btn close-btn" title="Close (Esc)" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </button>
       </div>
 
-      <button id="polishBtn" class="primary">✨ Polish</button>
-
-      <label class="field-label" for="output">Polished prompt</label>
-      <textarea id="output" rows="9" placeholder="your clean prompt will appear here..." readonly></textarea>
-
-      <div class="row">
-        <div class="result-actions">
-          <button id="pasteBtn" class="primary" disabled>⤵ Paste back</button>
-          <button id="copyBtn" class="ghost" disabled>📋 Copy</button>
-        </div>
-        <span id="status" class="status"></span>
+      <!-- Brand -->
+      <div class="hero">
+        <img class="logo" src="../assets/icon.png" alt="Lazy AI" />
+        <h1 class="wordmark">Lazy AI</h1>
       </div>
-    </main>
+
+      <!-- Composer (chat-style input). Send replaces the old "Polish" button. -->
+      <div class="composer glass">
+        <textarea id="prompt" class="composer-input" rows="3" placeholder="Type or paste a rough prompt…"></textarea>
+
+        <!-- Context / style field — revealed by the Context/style toggle. -->
+        <input id="context" class="context-input" type="text" hidden
+               placeholder="Context / style — e.g. write like a senior dev · output as a table" />
+
+        <!-- Attached file/image chip. -->
+        <div id="fileChip" class="file-chip" hidden>
+          <span id="fileName" class="chip-name"></span>
+          <button id="fileRemove" class="chip-x" title="Remove" aria-label="Remove file">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+          </button>
+        </div>
+
+        <div class="composer-bar">
+          <div class="bar-left">
+            <!-- "+" — upload any file or image -->
+            <button id="fileBtn" class="icon-btn" title="Attach a file or image" aria-label="Attach file">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+            </button>
+            <!-- Context / style toggle (replaces the timer button) -->
+            <button id="contextBtn" class="pill-btn" title="Add context or style" aria-pressed="false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg>
+              <span>Context / style</span>
+            </button>
+          </div>
+
+          <div class="bar-right">
+            <!-- Model picker — custom dropdown so each choice shows its provider icon -->
+            <div class="model-dd" id="modelDD">
+              <button type="button" class="model-trigger" id="modelTrigger" title="Model" aria-haspopup="listbox" aria-expanded="false">
+                <span class="model-ic" id="modelTriggerIc"></span>
+                <span class="model-name" id="modelTriggerName">Model</span>
+                <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+              </button>
+              <div class="model-menu" id="modelMenu" role="listbox" hidden></div>
+            </div>
+            <!-- Send (coral) — polishes the prompt -->
+            <button id="sendBtn" class="send-btn" title="Polish" aria-label="Polish">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Polished result — its own field, revealed after the first polish. -->
+      <div id="result" class="result glass" hidden>
+        <textarea id="output" class="result-output" rows="6" placeholder="Your clean prompt will appear here…" readonly></textarea>
+        <div class="result-bar">
+          <div class="result-actions">
+            <!-- "Use" — replaces "Paste back" (sends the result to the source app) -->
+            <button id="useBtn" class="use-btn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 10-5 5 5 5"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>
+              Use
+            </button>
+            <!-- Copy (overlapping-sheets icon) -->
+            <button id="copyBtn" class="icon-btn" title="Copy" aria-label="Copy">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+            </button>
+          </div>
+          <!-- Repeat — polish the input again for a fresh result -->
+          <button id="repeatBtn" class="icon-btn repeat-btn" title="Polish again" aria-label="Polish again">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <span id="status" class="status"></span>
+    </div>
 
     <script src="renderer.js"></script>
   </body>

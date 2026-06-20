@@ -99,6 +99,16 @@ public static class LazyWin {
     names.AddRange(titles);
     return names;
   }
+
+  // Normalized (alnum-lowercased) process name owning a window, or "" — used to tell a
+  // real browser from an Electron/WebView2 app and to decide if a "launch website" can
+  // be skipped (we're already in a browser) rather than spawning a duplicate browser.
+  public static string ProcName(IntPtr h) {
+    try {
+      uint pid = 0; GetWindowThreadProcessId(h, out pid);
+      return Norm(Process.GetProcessById((int)pid).ProcessName);
+    } catch { return ""; }
+  }
 }
 "@
 
@@ -112,6 +122,14 @@ try { [void][LazyCtl]::SetProcessDpiAwarenessContext([IntPtr](-4)) } catch { try
 # honored (the lock is what otherwise silently drops our focus change, especially
 # when launched from a different host shell). 0x2001 = SPI_SETFOREGROUNDLOCKTIMEOUT.
 try { [void][LazyCtl]::SystemParametersInfo(0x2001, 0, [IntPtr]::Zero, 0) } catch {}
+
+# Lightweight diagnostic log so a failing run can be inspected after the fact
+# (the overlay/keystrokes can't be watched live). Appends to %TEMP%\lazy-ai-control.log;
+# safe to delete anytime. Records the target/foreground handles and per-action focus.
+$LogFile = Join-Path $env:TEMP "lazy-ai-control.log"
+function Log([string]$m) {
+  try { Add-Content -LiteralPath $LogFile -Value ("{0}  {1}" -f (Get-Date -Format "HH:mm:ss.fff"), $m) } catch {}
+}
 
 $AE = [System.Windows.Automation.AutomationElement]
 $InvokeP = [System.Windows.Automation.InvokePattern]::Pattern
@@ -131,8 +149,9 @@ $script:CurrentTarget = if ($TargetHwnd -ne 0) { [IntPtr]$TargetHwnd } else { [I
 # This is the verification the previous version lacked (it set focus once and assumed).
 function Focus-Window([IntPtr]$hWnd) {
   if ($hWnd -eq [IntPtr]::Zero) { return $false }
+  $ok = $false
   for ($i = 0; $i -lt 8; $i++) {
-    if ([LazyCtl]::GetForegroundWindow() -eq $hWnd) { return $true }
+    if ([LazyCtl]::GetForegroundWindow() -eq $hWnd) { $ok = $true; break }
     try {
       if ([LazyCtl]::IsIconic($hWnd)) { [void][LazyCtl]::ShowWindow($hWnd, 9) }  # SW_RESTORE
       $thisThread = [LazyCtl]::GetCurrentThreadId()
@@ -149,7 +168,23 @@ function Focus-Window([IntPtr]$hWnd) {
     } catch {}
     Start-Sleep -Milliseconds 120
   }
-  return ([LazyCtl]::GetForegroundWindow() -eq $hWnd)
+  if (-not $ok) { $ok = ([LazyCtl]::GetForegroundWindow() -eq $hWnd) }
+  # Settle: even once GetForegroundWindow reports the target, the per-thread keyboard
+  # focus needs a beat to actually transfer before SendKeys — without this, the FIRST
+  # keystroke of a no-launch plan (e.g. ctrl+l on an already-open Chrome) can still leak
+  # to the previously-focused window (our overlay). The launch path got this for free
+  # via its post-launch wait; this gives the no-launch path the same settle.
+  if ($ok) { Start-Sleep -Milliseconds 90 }
+  return $ok
+}
+
+# Is this window owned by a real WEB BROWSER (chrome/edge/firefox/...)? Distinct from
+# Electron/WebView2 desktop apps. Used so a mislabeled "launch <website>" doesn't spawn
+# a duplicate browser when we're already in one.
+function Test-IsBrowser([IntPtr]$h) {
+  if ($h -eq [IntPtr]::Zero) { return $false }
+  $p = [LazyWin]::ProcName($h)
+  return ($p -match '^(chrome|msedge|firefox|brave|opera|operagx|vivaldi|chromium|iexplore|librewolf|waterfox)$')
 }
 
 # Front-most VISIBLE window for an app (or Zero). Prefers the exact window the user
@@ -232,10 +267,13 @@ function Find-Element($id, $name) {
 
 $plan = Get-Content -Raw -LiteralPath $PlanFile | ConvertFrom-Json
 
+Log ("=== run: Target={0} ({1}) Overlay={2} fgAtStart={3}" -f [long]$TargetHwnd, [LazyWin]::ProcName([IntPtr]$TargetHwnd), [long]$OverlayHwnd, [long][LazyCtl]::GetForegroundWindow())
+
 # Bring the target app to the foreground up front (so the first keystroke lands in it,
 # not in our focused overlay). Best-effort here; each keystroke re-verifies anyway.
 if ($script:CurrentTarget -ne [IntPtr]::Zero) {
-  [void](Focus-Window $script:CurrentTarget)
+  $okf = Focus-Window $script:CurrentTarget
+  Log ("top-of-batch focus: target={0} fgAfter={1} focusOk={2}" -f [long]$script:CurrentTarget, [long][LazyCtl]::GetForegroundWindow(), $okf)
   Start-Sleep -Milliseconds 150
 }
 
@@ -288,12 +326,16 @@ foreach ($a in $plan) {
     }
     "press" {
       # VERIFY-FIRST: only inject when the intended window is provably foreground.
-      if (-not (Focus-Window $script:CurrentTarget)) { $aborted = $true; break }
+      $okf = Focus-Window $script:CurrentTarget
+      Log ("press '{0}': target={1} fgAfter={2} focusOk={3}" -f $a.send, [long]$script:CurrentTarget, [long][LazyCtl]::GetForegroundWindow(), $okf)
+      if (-not $okf) { $aborted = $true; break }
       [System.Windows.Forms.SendKeys]::SendWait([string]$a.send)
     }
     "text" {
       # VERIFY-FIRST: never paste into whatever happens to be focused.
-      if (-not (Focus-Window $script:CurrentTarget)) { $aborted = $true; break }
+      $okf = Focus-Window $script:CurrentTarget
+      Log ("text (len={0}): target={1} fgAfter={2} focusOk={3}" -f ([string]$a.text).Length, [long]$script:CurrentTarget, [long][LazyCtl]::GetForegroundWindow(), $okf)
+      if (-not $okf) { $aborted = $true; break }
       Paste-Text ([string]$a.text)  # clipboard-safe: restores prior content (e.g. a copied URL)
     }
     "launch" {
@@ -302,6 +344,7 @@ foreach ($a in $plan) {
       # and strands the first, then it won't reopen without a Task-Manager kill).
       $existing = Find-AppWindow ([string]$a.app)
       if ($existing -ne [IntPtr]::Zero) {
+        Log ("launch '{0}': reusing existing window {1}" -f $a.app, [long]$existing)
         $script:CurrentTarget = $existing
         [void](Focus-Window $script:CurrentTarget)
         Start-Sleep -Milliseconds 250
@@ -312,21 +355,38 @@ foreach ($a in $plan) {
         # before any keystroke targets it (the launch race the old code ignored).
         $opened = $false
         try { Start-Process -FilePath ([string]$a.app) -ErrorAction Stop; $opened = $true } catch { $opened = $false }
+        $launched = $opened
         if (-not $opened) {
-          # Microsoft Store / UWP app with no plain exe name → Start-menu search.
-          [LazyCtl]::keybd_event(0x5B, 0, 0, [UIntPtr]::Zero)  # LWIN down
-          [LazyCtl]::keybd_event(0x5B, 0, 2, [UIntPtr]::Zero)  # LWIN up
-          Start-Sleep -Milliseconds 500
-          $q = ([string]$a.app) -replace '[+^%~(){}\[\]]', '{$&}'
-          [System.Windows.Forms.SendKeys]::SendWait($q)
-          Start-Sleep -Milliseconds 850
-          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+          if (Test-IsBrowser $script:CurrentTarget) {
+            # We're ALREADY in a browser and the "app" isn't a real executable — this is
+            # almost certainly a WEBSITE the model mislabeled as an app (e.g. launch
+            # "youtube"). Do NOT Start-menu-launch a new browser: that spawns a duplicate
+            # that can strand the user's Chrome (Task-Manager-kill territory). Skip it —
+            # the plan's following keyboard actions (ctrl+l + type the URL) navigate the
+            # browser we're already in.
+            Log ("launch '{0}': SKIPPED (already in browser; treat as website navigation, no new window)" -f $a.app)
+          } else {
+            # Genuine app with no plain exe name (Microsoft Store / UWP) → Start-menu search.
+            Log ("launch '{0}': Start-menu fallback" -f $a.app)
+            [LazyCtl]::keybd_event(0x5B, 0, 0, [UIntPtr]::Zero)  # LWIN down
+            [LazyCtl]::keybd_event(0x5B, 0, 2, [UIntPtr]::Zero)  # LWIN up
+            Start-Sleep -Milliseconds 500
+            $q = ([string]$a.app) -replace '[+^%~(){}\[\]]', '{$&}'
+            [System.Windows.Forms.SendKeys]::SendWait($q)
+            Start-Sleep -Milliseconds 850
+            [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+            $launched = $true
+          }
+        } else {
+          Log ("launch '{0}': Start-Process" -f $a.app)
         }
-        $win = Wait-ForAppWindow ([string]$a.app) 9000
-        if ($win -ne [IntPtr]::Zero) {
-          $script:CurrentTarget = $win
-          [void](Focus-Window $script:CurrentTarget)
-          Start-Sleep -Milliseconds 250
+        if ($launched) {
+          $win = Wait-ForAppWindow ([string]$a.app) 9000
+          if ($win -ne [IntPtr]::Zero) {
+            $script:CurrentTarget = $win
+            [void](Focus-Window $script:CurrentTarget)
+            Start-Sleep -Milliseconds 250
+          }
         }
       }
     }
@@ -371,8 +431,10 @@ foreach ($a in $plan) {
 if ($aborted) {
   # Couldn't guarantee the right window had focus — fail LOUD instead of typing into
   # the wrong app. main.js surfaces this and the loop can re-plan from a fresh shot.
+  Log "ABORTED: could not focus target before a keystroke action"
   [Console]::Error.WriteLine("Couldn't focus the target window - aborted before typing to avoid sending text to the wrong app.")
   exit 1
 }
+Log "=== run complete"
 
 # Clipboard is restored at the SESSION level in main.js (see note above), not here.

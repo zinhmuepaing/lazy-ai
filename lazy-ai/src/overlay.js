@@ -51,8 +51,8 @@ function setSpeaking(on) {
 // ---- Drawing primitives (coordinates are screenshot pixels) ---------------
 // Every shape is drawn through an `anim` object so the walkthrough can reveal it
 // over time: { progress 0→1 (entrance), pulse 0→1 (breathing glow), alpha }.
-const ACCENT = "#0071e3"; // Apple action/focus blue — visible over screenshots
-const LABEL_BG = "rgba(0, 102, 204, 0.96)";
+const ACCENT = "#ec4d25"; // coral — visible over screenshots
+const LABEL_BG = "rgba(236, 77, 37, 0.96)";
 
 // Line width scales with the screenshot size so HiDPI captures don't hairline.
 function baseStroke() {
@@ -138,7 +138,7 @@ function drawHighlight(x, y, w, h, label, a) {
   const ww = w * easeOut(Math.min(1, progress / 0.8)); // band wipes in left→right
   ctx.shadowColor = ACCENT;
   ctx.shadowBlur = 16 * pulse;
-  ctx.fillStyle = `rgba(0, 113, 227, ${0.15 + 0.1 * pulse})`;
+  ctx.fillStyle = `rgba(236, 77, 37, ${0.15 + 0.1 * pulse})`;
   ctx.beginPath();
   ctx.roundRect(x, y, ww, h, 4);
   ctx.fill();
@@ -419,7 +419,7 @@ function startWalkthrough(steps, done = true, accumulate = false) {
   // While guiding (done:false) the bar's button means "I've done it, continue"
   // — a manual fallback in case auto-detection ever misses the action.
   awaitingAction = !done;
-  els.askBtn.textContent = done ? "Ask" : "Next ▶";
+  els.askBtn.title = done ? "Ask" : "Continue"; // icon-only send button; title gives context
   clearCanvas();
   setAnswer("", ""); // audio only — hide the "Looking…" status; no narration subtitle
   walk = { steps, i: 0, stepStart: 0, raf: 0, timer: 0, done, accumulate };
@@ -431,7 +431,7 @@ function startWalkthrough(steps, done = true, accumulate = false) {
 function manualContinue() {
   awaitingAction = false;
   stopWalkthrough();
-  els.askBtn.textContent = "Ask";
+  els.askBtn.title = "Ask";
   clearCanvas();
   setAnswer("Looking at your screen…", "loading");
   window.lazyAI.guideContinue();
@@ -448,7 +448,7 @@ window.lazyAI.onPlaySteps((data) => {
   els.askBtn.disabled = false;
   const steps = data.steps && data.steps.length ? data.steps : [{ say: "Done.", draw: [] }];
   startWalkthrough(steps, data.done !== false, data.accumulate === true); // undefined → done, replace
-  if (overlayMode === "control") els.askBtn.textContent = "Do it"; // keep control-mode label
+  if (overlayMode === "control") els.askBtn.title = "Do it"; // keep control-mode label
 });
 
 // Loading / error / hint captions from the loop.
@@ -468,7 +468,7 @@ window.lazyAI.onOverlayClear(() => {
 // guiding (watching the screen for the user to act) until the task is done.
 function ask() {
   els.askBtn.disabled = true;
-  els.askBtn.textContent = overlayMode === "control" ? "Do it" : "Ask";
+  els.askBtn.title = overlayMode === "control" ? "Do it" : "Ask";
   stopWalkthrough();
   clearCanvas();
   setAnswer("Looking at your screen…", "loading");
@@ -496,9 +496,8 @@ async function startRecording() {
   };
   mediaRecorder.onstop = onRecordingStop;
   mediaRecorder.start();
-  els.micBtn.classList.add("recording");
-  els.micBtn.textContent = "⏹";
-  setAnswer("Listening… click ⏹ when you're done speaking.", "loading");
+  els.micBtn.classList.add("recording"); // CSS swaps the mic glyph for a black stop-square
+  setAnswer("Listening… click the stop button when you're done speaking.", "loading");
 }
 
 function stopRecording() {
@@ -507,7 +506,6 @@ function stopRecording() {
 
 async function onRecordingStop() {
   els.micBtn.classList.remove("recording");
-  els.micBtn.textContent = "🎤";
   if (audioStream) audioStream.getTracks().forEach((t) => t.stop());
 
   const blob = new Blob(audioChunks, { type: mediaRecorder?.mimeType || "audio/webm" });
@@ -585,7 +583,7 @@ window.lazyAI.onOverlayShow((data) => {
   setAnswer("", "");
   // Reflect the mode in the bar so it's obvious whether it will ACT or EXPLAIN.
   if (barTitle) barTitle.innerHTML = overlayMode === "control" ? "Screen<b>Control</b>" : "Screen<b>Teacher</b>";
-  els.askBtn.textContent = overlayMode === "control" ? "Do it" : "Ask";
+  els.askBtn.title = overlayMode === "control" ? "Do it" : "Ask";
   els.question.placeholder =
     overlayMode === "control"
       ? "tell me what to do… e.g. “click the Send button”, “open Notepad” (Enter, Esc to cancel)"

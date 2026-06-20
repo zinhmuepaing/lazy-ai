@@ -1,16 +1,25 @@
-/* Lazy AI extension — injected UI. High z-index so it floats above page content. */
+/* Lazy AI extension — injected UI. Apple-minimalist liquid glass, coral accent.
+   High z-index so it floats above page content. The panel uses backdrop-filter,
+   so it frosts the live page behind it — real glass. */
 
+/* FAB + panel use the SAME transparent liquid-glass material as the Screen
+   Control / Screen Teacher request bar: rgba(245,245,247,0.72) + blur(20px) +
+   a hairline and a bright specular top edge. backdrop-filter frosts the live
+   page behind them, so they're genuinely see-through. */
 #lazy-ai-fab {
   position: fixed;
   right: 22px;
   bottom: 22px;
-  width: 46px;
-  height: 46px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
-  border: none;
-  background: center / cover no-repeat;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  /* icon.png (set inline in JS) sits centered on the frosted glass disc */
+  background: rgba(245, 245, 247, 0.72) center / 58% no-repeat;
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
   cursor: pointer;
-  box-shadow: 0 6px 20px rgba(109, 124, 255, 0.45);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65), 0 8px 30px rgba(0, 0, 0, 0.12);
   z-index: 2147483646;
   transition: transform 0.12s ease, box-shadow 0.12s ease;
   padding: 0;
@@ -18,23 +27,28 @@
 }
 #lazy-ai-fab:hover {
   transform: scale(1.08);
-  box-shadow: 0 8px 26px rgba(109, 124, 255, 0.6);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 10px 32px rgba(236, 77, 37, 0.35);
 }
 
 #lazy-ai-panel {
   position: fixed;
   right: 22px;
-  bottom: 80px;
+  bottom: 82px;
   width: 360px;
-  background: #181b22;
-  color: #e6e8ec;
-  border: 1px solid #2b303b;
-  border-radius: 14px;
+  background: rgba(245, 245, 247, 0.72);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  color: #1d1d1f;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 18px;
   padding: 14px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65), 0 8px 30px rgba(0, 0, 0, 0.12);
   z-index: 2147483647;
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-family: "SF Pro Text", -apple-system, system-ui, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
+
+#lazy-ai-panel svg { width: 16px; height: 16px; }
 
 #lazy-ai-panel .la-head {
   display: flex;
@@ -42,69 +56,210 @@
   gap: 8px;
   margin-bottom: 10px;
 }
-#lazy-ai-panel .la-title {
+/* Brand lockup — logo + "Lazy AI" wordmark, matching the redesigned popup page */
+#lazy-ai-panel .la-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+#lazy-ai-panel .la-logo {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: block;
+}
+#lazy-ai-panel .la-wordmark {
   font-size: 16px;
-  font-weight: 700;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+  color: #ec4d25; /* "Lazy AI" in the accent color */
 }
-#lazy-ai-panel .la-title b {
-  color: #6d7cff;
-  font-weight: 700;
-}
-#lazy-ai-panel .la-model {
-  margin-left: auto;
-  background: #1f232c;
-  color: #e6e8ec;
-  border: 1px solid #2b303b;
-  border-radius: 8px;
-  padding: 4px 6px;
+/* Model picker — custom dropdown with provider brand icons */
+#lazy-ai-panel .la-model-dd { position: relative; margin-left: auto; }
+#lazy-ai-panel .la-model-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 180px;
+  height: 30px;
+  padding: 0 8px 0 10px;
+  background: rgba(255, 255, 255, 0.7);
+  color: #1d1d1f;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 9999px;
   font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  outline: none;
+  cursor: pointer;
+  transition: background 0.15s;
 }
+#lazy-ai-panel .la-model-trigger:hover { background: rgba(0, 0, 0, 0.05); }
+#lazy-ai-panel .la-model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#lazy-ai-panel .la-model-ic { display: inline-flex; flex: 0 0 auto; }
+#lazy-ai-panel .la-model-ic svg { width: 16px; height: 16px; display: block; }
+#lazy-ai-panel .la-chev { width: 13px; height: 13px; opacity: 0.5; flex: 0 0 auto; }
+
+#lazy-ai-panel .la-model-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 200px;
+  padding: 6px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: saturate(180%) blur(22px);
+  -webkit-backdrop-filter: saturate(180%) blur(22px);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 14px 40px rgba(0, 0, 0, 0.2);
+  z-index: 2147483647;
+}
+#lazy-ai-panel .la-model-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: #1d1d1f;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+#lazy-ai-panel .la-model-item:hover { background: rgba(0, 0, 0, 0.05); }
+#lazy-ai-panel .la-menu-ic { display: inline-flex; flex: 0 0 auto; }
+#lazy-ai-panel .la-menu-ic svg { width: 16px; height: 16px; display: block; }
+#lazy-ai-panel .la-model-label { flex: 1; }
+#lazy-ai-panel .la-check { width: 16px; height: 16px; color: #ec4d25; opacity: 0; flex: 0 0 auto; }
+#lazy-ai-panel .la-model-item.selected .la-check { opacity: 1; }
 #lazy-ai-panel .la-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   background: transparent;
   border: none;
-  color: #8b93a1;
-  font-size: 14px;
+  border-radius: 8px;
+  color: #6e6e73;
   cursor: pointer;
+  transition: background 0.15s, color 0.15s;
 }
+#lazy-ai-panel .la-close:hover { background: rgba(0, 0, 0, 0.05); color: #1d1d1f; }
 
 #lazy-ai-panel .la-status {
   font-size: 12px;
-  color: #8b93a1;
+  color: #6e6e73;
   min-height: 16px;
   margin-bottom: 6px;
 }
-#lazy-ai-panel .la-status.ok { color: #3ecf8e; }
-#lazy-ai-panel .la-status.err { color: #ff6b6b; }
-#lazy-ai-panel .la-status.loading { color: #6d7cff; }
+#lazy-ai-panel .la-status.ok { color: #248a3d; }
+#lazy-ai-panel .la-status.err { color: #d70015; }
+#lazy-ai-panel .la-status.loading { color: #ec4d25; }
 
 #lazy-ai-panel .la-output {
   width: 100%;
   box-sizing: border-box;
-  background: #1f232c;
-  color: #e6e8ec;
-  border: 1px solid #2b303b;
-  border-radius: 10px;
-  padding: 10px;
+  background: rgba(255, 255, 255, 0.6);
+  color: #1d1d1f;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 12px;
+  padding: 10px 12px;
   font-size: 13px;
   font-family: inherit;
+  line-height: 1.5;
   resize: vertical;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+#lazy-ai-panel .la-output:focus {
+  border-color: #ec4d25;
+  box-shadow: 0 0 0 3px rgba(236, 77, 37, 0.25);
 }
 
 #lazy-ai-panel .la-actions {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
   margin-top: 10px;
 }
-#lazy-ai-panel .la-actions button {
-  flex: 1;
-  border: none;
-  border-radius: 8px;
-  padding: 9px;
-  font-size: 13px;
-  font-weight: 600;
+#lazy-ai-panel .la-actions-left { display: flex; align-items: center; gap: 8px; }
+/* Repeat — ghost icon button, bottom-right (re-polish for a fresh result) */
+#lazy-ai-panel .la-repeat {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 10px;
+  background: transparent;
+  color: #1d1d1f;
   cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
 }
-#lazy-ai-panel .la-replace { background: #6d7cff; color: white; }
-#lazy-ai-panel .la-replace:hover { background: #5868f0; }
-#lazy-ai-panel .la-copy { background: #2b303b; color: #e6e8ec; }
-#lazy-ai-panel .la-copy:hover { background: #353b48; }
+#lazy-ai-panel .la-repeat:hover { background: rgba(0, 0, 0, 0.05); }
+#lazy-ai-panel .la-repeat:active { transform: scale(0.94); }
+/* "Use" — coral liquid-glass pill (per Liquid_Button.txt) with a
+   corner-down-left glyph (replaces "Replace") */
+#lazy-ai-panel .la-replace {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 9999px;
+  padding: 9px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  background: linear-gradient(180deg, rgba(248, 100, 63, 0.92), rgba(225, 65, 25, 0.92));
+  color: #fff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -2px 6px rgba(139, 32, 12, 0.22),
+    0 6px 18px rgba(236, 77, 37, 0.38);
+  transition: box-shadow 0.15s, transform 0.1s, background 0.15s;
+}
+#lazy-ai-panel .la-replace::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.5) 0%, rgba(255, 255, 255, 0.12) 36%, rgba(255, 255, 255, 0) 60%);
+  pointer-events: none;
+}
+#lazy-ai-panel .la-replace:hover {
+  background: linear-gradient(180deg, rgba(255, 110, 74, 0.96), rgba(233, 71, 31, 0.96));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.62), inset 0 -2px 6px rgba(139, 32, 12, 0.22), 0 8px 22px rgba(236, 77, 37, 0.46);
+}
+#lazy-ai-panel .la-replace:active { transform: scale(0.96); }
+/* Copy — ghost icon button (overlapping sheets) */
+#lazy-ai-panel .la-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 10px;
+  background: transparent;
+  color: #1d1d1f;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+}
+#lazy-ai-panel .la-copy:hover { background: rgba(0, 0, 0, 0.05); }
+#lazy-ai-panel .la-copy:active { transform: scale(0.94); }
