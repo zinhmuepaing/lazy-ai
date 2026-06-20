@@ -1,16 +1,32 @@
-/* Lazy AI — Screen Teacher overlay. Transparent full-screen window; only the
-   canvas annotations and the control bar are visible. */
+/* Lazy AI — Screen Teacher / Control overlay. Transparent full-screen window.
+   "Apple Minimalist Glass": a neutral, near-monochrome palette, generous space,
+   hairline borders, and a single restrained accent. Per Apple's system, real
+   translucent glass is reserved for FLOATING chrome — the control bar and the
+   status pill — while everything else stays clean and solid. */
 
 :root {
-  --bg: #181b22;
-  --panel: #1f232c;
-  --border: #2b303b;
-  --text: #e6e8ec;
-  --muted: #8b93a1;
-  --accent: #6d7cff;
-  --accent-hover: #5868f0;
-  --ok: #3ecf8e;
-  --err: #ff6b6b;
+  /* Neutral Apple palette */
+  --canvas: #f5f5f7;
+  --card: #ffffff;
+  --ink: #1d1d1f;
+  --ink-secondary: #6e6e73;
+  --ink-muted: #86868b;
+  --accent: #0066cc; /* action blue — used sparingly */
+  --accent-hover: #0055b3;
+  --focus: #0071e3;
+  --ok: #248a3d;
+  --err: #d70015;
+  --hairline: rgba(0, 0, 0, 0.1);
+  --field-hover: rgba(0, 0, 0, 0.04);
+  --radius-field: 11px;
+  --radius-card: 18px;
+
+  /* Liquid Glass material — floating chrome only */
+  --glass-bg: rgba(245, 245, 247, 0.72);
+  --lg-blur: 20px;
+  --specular: rgba(255, 255, 255, 0.65); /* high-quality top edge */
+  --glass-hairline: rgba(0, 0, 0, 0.12);
+  --float-shadow: 0 8px 30px rgba(0, 0, 0, 0.12); /* single soft shadow, no glow */
 }
 
 * { box-sizing: border-box; }
@@ -21,7 +37,8 @@ html, body {
   height: 100%;
   overflow: hidden;
   background: transparent;
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-family: "SF Pro Display", "SF Pro Text", -apple-system, system-ui, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
 /* Canvas fills the screen; its internal resolution matches the screenshot. */
@@ -33,7 +50,20 @@ html, body {
   pointer-events: none; /* drawings never eat clicks */
 }
 
-/* Control bar, bottom-center. */
+/* ---- LiquidGlassCard, ported as a reusable class (Apple-minimal) ----------
+   Translucent surface + soft blurred backdrop + a high-quality border (hairline
+   + bright inset top edge) + a single soft shadow. The React component's
+   blur/radius/glow/shadow props map to CSS vars per surface; glow is intentionally
+   none (Apple uses blur, not glow, for floating elevation). */
+.liquid-glass {
+  background: var(--glass-bg);
+  backdrop-filter: saturate(180%) blur(var(--lg-blur));
+  -webkit-backdrop-filter: saturate(180%) blur(var(--lg-blur));
+  border: 1px solid var(--glass-hairline);
+  box-shadow: inset 0 1px 0 var(--specular), var(--float-shadow);
+}
+
+/* Control bar, bottom-center — floating liquid glass (.liquid-glass in markup). */
 #bar {
   position: fixed;
   left: 50%;
@@ -42,79 +72,97 @@ html, body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 10px;
+  padding: 10px 12px;
   width: min(560px, 86vw);
-  background: rgba(24, 27, 34, 0.96);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+  border-radius: var(--radius-card);
 }
 
-.bar-title { font-size: 14px; font-weight: 700; color: var(--text); white-space: nowrap; }
-.bar-title b { color: var(--accent); }
+.bar-title { font-size: 14px; font-weight: 600; color: var(--ink); white-space: nowrap; letter-spacing: -0.2px; }
+.bar-title b { color: var(--accent); font-weight: 600; }
 
 #question {
   flex: 1;
-  background: var(--panel);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 10px 12px;
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-field);
+  padding: 10px 14px;
   font-size: 14px;
   font-family: inherit;
   outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
-#question:focus { border-color: var(--accent); }
+#question::placeholder { color: var(--ink-muted); }
+#question:focus {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.22); /* Apple focus ring */
+}
 
 button {
   font-family: inherit;
   font-size: 14px;
-  font-weight: 600;
-  border-radius: 10px;
-  padding: 10px 14px;
+  font-weight: 400;
+  border-radius: 9999px; /* Apple pill signals actionability */
+  padding: 9px 18px;
   cursor: pointer;
   border: 1px solid transparent;
+  letter-spacing: -0.2px;
+  transition: background 0.2s, color 0.2s, border-color 0.2s, transform 0.1s;
 }
-button:disabled { opacity: 0.45; cursor: default; }
+button:disabled { opacity: 0.4; cursor: default; }
+button:not(:disabled):active { transform: scale(0.96); } /* system press micro-interaction */
+
 .primary { background: var(--accent); color: #fff; }
 .primary:not(:disabled):hover { background: var(--accent-hover); }
-.ghost { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
-.ghost:hover { background: var(--border); }
+
+.ghost { background: transparent; color: var(--ink); border: 1px solid var(--hairline); }
+.ghost:hover { background: var(--field-hover); }
+
 #micBtn.recording { background: var(--err); color: #fff; border-color: var(--err); animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
-.close-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 10px 12px; }
-.close-btn:hover { background: var(--panel); color: var(--text); }
 
-/* Floating status — centered plain text, NO box/background (so it never covers an
-   app's input field), plus a small audio-wave shown while speaking. */
+.close-btn { background: transparent; border: 1px solid var(--hairline); color: var(--ink-secondary); padding: 9px 13px; }
+.close-btn:hover { background: var(--field-hover); color: var(--ink); }
+
+/* Floating status — a compact liquid-glass capsule that FOLLOWS THE CURSOR (its
+   position is driven by overlay.js via `transform`; left/top stay at 0). Holds the
+   "Planning…" text and a small audio-wave shown while speaking. Glass via the
+   .liquid-glass class in markup; ink text reads cleanly on the frosted material. */
 #status {
   position: fixed;
-  left: 50%;
-  top: 42%;
-  transform: translateX(-50%);
+  left: 0;
+  top: 0;
   display: none;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
   gap: 10px;
-  max-width: 70vw;
-  text-align: center;
+  max-width: min(360px, 70vw);
+  padding: 9px 16px;
+  border-radius: 9999px; /* pill capsule */
   pointer-events: none; /* never traps the cursor; clicks pass through */
-  color: #fff;
-  font-size: 20px;
-  font-weight: 600;
-  /* legible over any background since there's no panel behind it */
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9), 0 0 14px rgba(0, 0, 0, 0.75);
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 400;
+  letter-spacing: -0.2px;
+  will-change: transform;
+  /* Same liquid-glass material as .liquid-glass, inlined here because this
+     element's className is rebuilt in JS (setAnswer) and would drop the class. */
+  background: var(--glass-bg);
+  backdrop-filter: saturate(180%) blur(var(--lg-blur));
+  -webkit-backdrop-filter: saturate(180%) blur(var(--lg-blur));
+  border: 1px solid var(--glass-hairline);
+  box-shadow: inset 0 1px 0 var(--specular), var(--float-shadow);
 }
 #status.show,
 #status.speaking { display: flex; }
-#status.err #status-text { color: #ff9d9d; }
-#status.loading #status-text { color: #b9c0ff; }
+#status.err #status-text { color: var(--err); }
+#status.loading #status-text { color: var(--accent); }
 
 /* Audio-wave: five bars that bounce; only visible while .speaking. */
-#wave { display: none; align-items: flex-end; gap: 4px; height: 22px; }
+#wave { display: none; align-items: flex-end; gap: 4px; height: 16px; }
 #status.speaking #wave { display: flex; }
 #wave i {
-  width: 4px;
+  width: 3px;
   height: 100%;
   border-radius: 2px;
   background: var(--accent);
@@ -128,4 +176,10 @@ button:disabled { opacity: 0.45; cursor: default; }
 @keyframes wave {
   0%, 100% { transform: scaleY(0.3); opacity: 0.7; }
   50% { transform: scaleY(1); opacity: 1; }
+}
+
+/* Fallback if backdrop-filter is unavailable: make the glass nearly opaque so
+   ink text stays legible over any screen content. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .liquid-glass, #status { background: rgba(245, 245, 247, 0.97); }
 }

@@ -22,7 +22,8 @@
 // band arithmetically instead of eyeballing it, and emit a forgiving full-width
 // "highlight" band (rendered in overlay.js) rather than a tight floating box. This
 // is what makes "box the exact line being explained / the line an example refers
-// to" land reliably on Sonnet. Opus 4.7/4.8 stay available in Settings.
+// to" land reliably on Sonnet. Opus 4youtube.com
+// ilable in Settings.
 //
 // Key is read from process.env (loaded by main.js, overridable in Settings).
 

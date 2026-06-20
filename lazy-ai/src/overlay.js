@@ -40,17 +40,19 @@ function setAnswer(text, kind = "") {
   els.statusText.textContent = text || "";
   const speaking = els.status.classList.contains("speaking");
   els.status.className = (text ? "show" : "") + (kind ? " " + kind : "") + (speaking ? " speaking" : "");
+  syncFollowLoop(); // start/stop the cursor-follow loop with the pill's visibility
 }
 
 function setSpeaking(on) {
   els.status.classList.toggle("speaking", on);
+  syncFollowLoop();
 }
 
 // ---- Drawing primitives (coordinates are screenshot pixels) ---------------
 // Every shape is drawn through an `anim` object so the walkthrough can reveal it
 // over time: { progress 0→1 (entrance), pulse 0→1 (breathing glow), alpha }.
-const ACCENT = "#6d7cff";
-const LABEL_BG = "rgba(109, 124, 255, 0.96)";
+const ACCENT = "#0071e3"; // Apple action/focus blue — visible over screenshots
+const LABEL_BG = "rgba(0, 102, 204, 0.96)";
 
 // Line width scales with the screenshot size so HiDPI captures don't hairline.
 function baseStroke() {
@@ -136,7 +138,7 @@ function drawHighlight(x, y, w, h, label, a) {
   const ww = w * easeOut(Math.min(1, progress / 0.8)); // band wipes in left→right
   ctx.shadowColor = ACCENT;
   ctx.shadowBlur = 16 * pulse;
-  ctx.fillStyle = `rgba(109, 124, 255, ${0.15 + 0.1 * pulse})`;
+  ctx.fillStyle = `rgba(0, 113, 227, ${0.15 + 0.1 * pulse})`;
   ctx.beginPath();
   ctx.roundRect(x, y, ww, h, 4);
   ctx.fill();
@@ -233,6 +235,64 @@ function setInteractive(on) {
 }
 els.bar.addEventListener("mouseenter", () => setInteractive(true));
 els.bar.addEventListener("mouseleave", () => setInteractive(false));
+
+// ---- Cursor-follow for the floating status pill ---------------------------
+// The "Planning…" status + audio-wave used to sit dead-center, covering whatever
+// the user was looking at. Instead we float the glass pill just below-right of the
+// cursor. The overlay is click-through with { forward: true }, so mousemove still
+// fires here (the same mouse-forwarding the bar's enter/leave above already rely
+// on) — no main-process change or new IPC needed. We smooth the motion with a lerp
+// so it glides without jitter, and clamp it so the pill never clips off-screen.
+const POINTER_OFFSET_X = 18; // px to the right of the cursor
+const POINTER_OFFSET_Y = 22; // px below the cursor
+const FOLLOW_EASE = 0.18; // 0→1 lerp factor; lower = floatier, higher = snappier
+const pointer = { x: window.innerWidth / 2, y: window.innerHeight * 0.42 }; // target
+const floatPos = { x: pointer.x, y: pointer.y }; // smoothed (eased) position
+let followRaf = 0;
+let pointerSeeded = false; // jump to the first real cursor pos instead of gliding from center
+
+document.addEventListener(
+  "mousemove",
+  (event) => {
+    pointer.x = event.clientX;
+    pointer.y = event.clientY;
+    if (!pointerSeeded) {
+      floatPos.x = pointer.x;
+      floatPos.y = pointer.y;
+      pointerSeeded = true;
+    }
+  },
+  { passive: true }
+);
+
+function followFrame() {
+  floatPos.x += (pointer.x - floatPos.x) * FOLLOW_EASE;
+  floatPos.y += (pointer.y - floatPos.y) * FOLLOW_EASE;
+  const w = els.status.offsetWidth;
+  const h = els.status.offsetHeight;
+  // place below-right of the cursor, then keep the whole pill on-screen
+  let x = floatPos.x + POINTER_OFFSET_X;
+  let y = floatPos.y + POINTER_OFFSET_Y;
+  x = Math.min(Math.max(8, x), window.innerWidth - w - 8);
+  y = Math.min(Math.max(8, y), window.innerHeight - h - 8);
+  els.status.style.transform = `translate3d(${Math.round(x)}px, ${Math.round(y)}px, 0)`;
+  followRaf = requestAnimationFrame(followFrame);
+}
+
+function statusVisible() {
+  return els.status.classList.contains("show") || els.status.classList.contains("speaking");
+}
+
+// Run the follow loop only while the pill is actually visible (called from
+// setAnswer/setSpeaking, which toggle those classes). Avoids an idle rAF loop.
+function syncFollowLoop() {
+  if (statusVisible()) {
+    if (!followRaf) followRaf = requestAnimationFrame(followFrame);
+  } else if (followRaf) {
+    cancelAnimationFrame(followRaf);
+    followRaf = 0;
+  }
+}
 
 // ---- Narrated walkthrough (Live Teach) ------------------------------------
 // Plays the AI's steps in order: speak one sentence while ONLY that step's shape

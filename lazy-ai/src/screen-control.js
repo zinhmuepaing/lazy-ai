@@ -9,7 +9,7 @@
 // Defaults to Claude Sonnet 4.6 — fast/cheap and plenty for action planning
 // (keyboard actions don't need pixel-precise vision). Key from process.env.
 
-const DEFAULT_CONTROL_MODEL = "claude-sonnet-4-6";
+const DEFAULT_CONTROL_MODEL = "youtube.com/results?search_query=perfect+ed+sheeran";
 
 const SYSTEM_PROMPT = `you are Screen Control. you carry out a user's command on a Windows PC by producing a PLAN of input actions.
 
@@ -33,14 +33,33 @@ each <action> is one of:
 - {"type":"scroll","x":640,"y":430,"amount":-600}   LAST RESORT. scroll at a pixel point; amount NEGATIVE = down, POSITIVE = up.
 - {"type":"click","x":512,"y":360}          LAST RESORT. left-click a pixel point — only when there is NO keyboard way and the target is VISIBLE now.
 - {"type":"doubleclick","x":..,"y":..} / {"type":"rightclick","x":..,"y":..}   LAST RESORT.
+- {"type":"drag","x1":300,"y1":250,"x2":620,"y2":520}   press the left button at (x1,y1), DRAG across to (x2,y2), release. This is the ONLY way to DRAW a shape/stroke, move a slider/handle, or drag-and-drop. Coords are screenshot pixels (same frame as click).
+
+DRAWING / SLIDERS / DRAG-AND-DROP have NO keyboard way — use "drag". IMPORTANT: selecting a drawing tool does NOT draw anything. To draw a shape (a circle, rectangle, line, brush stroke) you must FIRST select the tool (ui_invoke / click its button), THEN issue a "drag" across the canvas from a start point to an end point — e.g. to draw a circle, drag from its top-left to its bottom-right. One drag = one stroke. Do not loop selecting the tool; after the tool is selected, the next action must be the drag.
 
 COORDINATES ARE PIXELS of the screenshot you are given (top-left is 0,0). x = pixels from the LEFT edge, y = pixels from the TOP. give INTEGERS at the exact CENTER of the target. the user message states the exact image size; x must be 0–width and y 0–height. read the position carefully off the image, as if you were clicking it yourself — aim dead-center on the control.
 
 NEVER use click/scroll for any of these — there is always a keyboard way:
 - opening an app  → use "launch" (never click a desktop/taskbar/Start icon). BUT if the app is ALREADY open (its window or its controls already appear in the UI ELEMENTS / screenshot), do NOT launch it again — just continue from the current state.
+- opening a WEBSITE in a browser that is already open (YouTube, a search, any URL) → do NOT "launch" the browser. Launching a browser that is already running can disrupt the user's session. Instead press "ctrl+l" to focus the address bar, then "text" the URL/query, then "press enter".
 - focusing a search or address bar → press its shortcut (browsers/Spotify "ctrl+l", many apps "ctrl+f" or "ctrl+k", then "text").
 - typing or submitting → "text" then "press enter".
-- closing/menus with known shortcuts → "press" (e.g. "alt+f4", "ctrl+w", "escape").
+- opening menus / dismissing popups → "press" (e.g. "escape", "ctrl+f"). Do NOT close the user's existing windows, tabs, or apps (alt+f4, ctrl+w, quitting) unless the goal EXPLICITLY asks to close something — closing the app you're working in strands the user's session.
+
+COPY / PASTE — MOVING DATA BETWEEN APPS (critical, read carefully):
+the system CLIPBOARD holds the ONE thing you copied — the PAYLOAD (a URL, a selection, a value). you can NOT see it; you move it by COPY then PASTE:
+- copy: focus/select the source, then {"type":"press","keys":"ctrl+c"} (for a browser URL: {"type":"press","keys":"ctrl+l"} to focus the address bar first, then ctrl+c).
+- paste: {"type":"press","keys":"ctrl+v"} — but ONLY into the FINAL destination field (the message/compose/document area), and ONLY once you have navigated there.
+PASTE THE PAYLOAD EXACTLY ONCE, AT ITS DESTINATION — nowhere else. a SEARCH / FIND box is NEVER where the payload goes; pasting your payload into a search box is a bug (it just searches for it and loses your place).
+TYPE vs PASTE — keep these two separate and never mix them up:
+- to SEARCH / FILTER / FIND / look something up (a contact, a file, a setting), TYPE the query with "text"/"ui_type". it is a short term you were given (a name) — TYPE it, never paste it. the clipboard holds your payload, not your search term, so pasting into search drops the WRONG text in.
+- to deliver the COPIED PAYLOAD, PASTE it with ctrl+v at its destination. NEVER use "text"/"ui_type" to reproduce the payload, or anything you copied or can see on screen — you cannot read it back accurately and WILL get it wrong (you'll type the command itself). always move it with ctrl+c → ctrl+v.
+- use "text"/"ui_type" for a literal string the USER DICTATED (a name to search, the words of a message they told you to send) or content they asked you to compose.
+worked example "copy this video's URL and send it to Bhone Min Thant on Teams":
+  turn 1 (copy the URL): {"done":false,"say":"Copying the video URL","actions":[{"type":"press","keys":"ctrl+l"},{"type":"press","keys":"ctrl+c"}]}
+  turn 2 (open Teams, then TYPE his name into search — do NOT paste here): launch microsoft teams / wait / press ctrl+e / text "Bhone Min Thant" / wait → LOOK
+  turn 3 (open his chat): {"type":"ui_invoke","ref":N} on his contact row → LOOK (wait for the message box to appear)
+  turn 4 (now at the destination, PASTE the URL): {"done":true,"actions":[{"type":"ui_click","ref":M},{"type":"press","keys":"ctrl+v"},{"type":"press","keys":"enter"}]}
 
 WHEN TO BATCH vs WHEN TO STOP AND LOOK:
 - BATCH everything and set "done":true ONLY when the whole task is deterministic and needs NO intermediate result — e.g. open an app and type into its main editing area (Notepad, Word, OneNote, a new doc). that is the fast path.
@@ -93,7 +112,7 @@ OUTPUT BUDGET (important): your entire reply must be ONE small JSON object and n
 
 const VALID_TYPES = new Set([
   "ui_invoke", "ui_click", "ui_type", // Stage 5.4 — act on real UI elements by ref
-  "launch", "press", "text", "wait", "scroll", "click", "doubleclick", "rightclick",
+  "launch", "press", "text", "wait", "scroll", "click", "doubleclick", "rightclick", "drag",
 ]);
 
 // Phase 1 — UIA pruning (space-complexity fix). A raw UIA dump of an app like
@@ -212,6 +231,9 @@ function sanitizeActions(raw) {
       case "doubleclick":
       case "rightclick":
         out.push({ type: a.type, x: toPx(a.x), y: toPx(a.y) });
+        break;
+      case "drag":
+        out.push({ type: "drag", x1: toPx(a.x1), y1: toPx(a.y1), x2: toPx(a.x2), y2: toPx(a.y2) });
         break;
       case "ui_invoke":
       case "ui_click":

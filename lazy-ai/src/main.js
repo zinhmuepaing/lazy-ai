@@ -88,6 +88,7 @@ let controlTurnCount = 0;
 let controlElements = []; // this turn's UIA element list (idx,name,type,rect,…)
 let controlTargetHwnd = 0; // the target app window (for UIA re-find at execution)
 let controlSourceHwnd = 0; // foreground window captured at summon (the app the user was in)
+let controlSavedClipboard = null; // user's clipboard text, preserved for the whole control session
 let sourceHwnd = null; // window the selection came from, to paste back into
 let lastScreenshot = null; // { base64, mediaType, width, height } for Screen Teacher
 let activeDisplay = null; // the display the current Screen Teacher session is bound to
@@ -690,6 +691,15 @@ function stopControl() {
   controlActive = false;
   if (controlTimer) clearTimeout(controlTimer);
   controlTimer = null;
+  // Restore the user's clipboard saved at session start (see startControlGoal).
+  // Idempotent: nulled after restoring, so the stopControl() at the top of
+  // startControlGoal and any repeated/dismiss calls don't double-restore. Only
+  // restore real text — a falsy ("") saved value means the clipboard held no text
+  // (e.g. an image), so we leave it rather than clobber it with an empty string.
+  if (controlSavedClipboard) {
+    clipboard.writeText(controlSavedClipboard);
+  }
+  controlSavedClipboard = null;
 }
 
 // Map a normalized fraction of the active display (fx, fy in 0–1) to a PHYSICAL
@@ -899,6 +909,14 @@ const SPATIAL_TYPES = ["click", "doubleclick", "rightclick", "scroll"];
 async function startControlGoal(command) {
   if (!overlayWindow || !overlayWindow.isVisible()) return;
   stopControl();
+  // Preserve the user's clipboard for the WHOLE session (restored in stopControl),
+  // NOT per-batch. Screen Control moves cross-app data with copy→paste (ctrl+c →
+  // ctrl+v), which spans multiple turns = multiple PowerShell batches; the old
+  // per-batch save/restore in control-batch.ps1 wiped the freshly-copied data
+  // before the paste turn could use it. Saving once here keeps copied data alive
+  // across turns. (Text-only: an image on the clipboard can't be preserved —
+  // readText() returns "" for it; documented caveat.)
+  controlSavedClipboard = clipboard.readText();
   controlActive = true;
   controlGoal = (command || "").trim();
   controlHistory = [];
@@ -930,6 +948,40 @@ function isMessagingGoal(goal) {
   return /\b(message|messaging|msg|send|tell|reply|writ|compose|say|dm|text|chat|ping)\b/i.test(String(goal || ""));
 }
 
+// Does the goal describe moving COPIED data — "copy/grab X then send/paste/share it"?
+// In this mode the payload itself must travel on the clipboard (ctrl+c → ctrl+v); the
+// only thing the agent should TYPE is a short search term (a person/app name).
+function isCopyPasteGoal(goal) {
+  const g = String(goal || "");
+  return /\b(copy|grab|copied)\b/i.test(g) && /\b(send|sent|paste|share|forward|message|msg|reply|dm|put|insert|into|to)\b/i.test(g);
+}
+
+// Lowercase alphanumeric word list, for fuzzy comparison of typed text vs. the goal.
+function goalWords(s) {
+  return String(s || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+}
+
+// Is `text` the model regurgitating the command/goal instead of real content (the
+// "it sends the prompt I requested" bug)? True only when the typed text reproduces the
+// WHOLE command — it contains the goal verbatim, or covers most of the goal's words.
+//
+// CRUCIAL: we must NOT flag a short FRAGMENT of the goal. A contact name, search term,
+// or dictated word almost always appears inside the command ("...send it to Bhone Min
+// Thant"), so a naive "is the typed text a substring of the goal" check (or a fraction
+// of the TYPED words) would wrongly flag a legitimate search query — which is exactly
+// what made the payload get pasted into the search box. So we only measure how much of
+// the GOAL the typed text covers (hits / goal-length): a fragment covers little, a full
+// regurgitation covers nearly all.
+function echoesGoal(text, goal) {
+  const tw = goalWords(text);
+  const gw = goalWords(goal);
+  if (tw.length < 3 || gw.length < 3) return false;
+  if (tw.join(" ").includes(gw.join(" "))) return true; // typed text contains the entire goal
+  const gset = new Set(gw);
+  const hits = tw.filter((w) => gset.has(w)).length;
+  return hits / gw.length >= 0.6; // typed text covers most of the goal's words
+}
+
 // Phase 3 — element disambiguation guard. The model sometimes targets the SEARCH
 // box (top of Teams/Outlook/Slack) for a ui_type that should go in the MESSAGE box
 // (bottom) — both are edit fields, so the prompt alone isn't enough. These are
@@ -940,6 +992,7 @@ function isMessagingGoal(goal) {
 function resolvePlan(actions, elements, goal, imageWidth, imageHeight) {
   const byRef = (ref) => (Array.isArray(elements) ? elements.find((e) => e.idx === ref) : null);
   const messaging = isMessagingGoal(goal);
+  const copyPaste = isCopyPasteGoal(goal);
   // Model click/scroll coords are PIXELS in the screenshot frame (W×H). Convert to a
   // 0–1 fraction of the display, then to physical px (DPI/multi-monitor accurate).
   const W = imageWidth || (lastScreenshot && lastScreenshot.width) || 1;
@@ -948,7 +1001,18 @@ function resolvePlan(actions, elements, goal, imageWidth, imageHeight) {
   for (const a of actions) {
     if (a.type === "launch") resolved.push({ type: "launch", app: a.app });
     else if (a.type === "press") resolved.push({ type: "press", send: winAutomation.composeSendKeys(a.keys) });
-    else if (a.type === "text") resolved.push({ type: "text", text: a.text });
+    else if (a.type === "text") {
+      // Guard 3 (field-unknown variant) — anti-regurgitation. On a "copy X and send it"
+      // task the model can't see the copied payload, so it sometimes TYPES the command
+      // itself. A plain "text" action doesn't tell us WHICH field is focused, so we must
+      // NOT blind-paste here (it could land in a search box). DROP it and let the model
+      // re-plan: the payload is moved by pressing ctrl+v at its real destination.
+      if (copyPaste && echoesGoal(a.text, goal)) {
+        console.warn("[lazy-ai] control: dropped goal-echo text (re-plan; payload is pasted at its destination, not typed)");
+      } else {
+        resolved.push({ type: "text", text: a.text });
+      }
+    }
     else if (a.type === "wait") resolved.push({ type: "wait", ms: a.ms });
     else if (a.type === "scroll") {
       const p = fractionToPhysical(a.x / W, a.y / H);
@@ -956,9 +1020,16 @@ function resolvePlan(actions, elements, goal, imageWidth, imageHeight) {
     } else if (a.type === "click" || a.type === "doubleclick" || a.type === "rightclick") {
       const p = fractionToPhysical(a.x / W, a.y / H);
       resolved.push({ type: a.type, x: p.x, y: p.y });
+    } else if (a.type === "drag") {
+      // Both endpoints are screenshot pixels → physical px (DPI/multi-monitor accurate).
+      const p1 = fractionToPhysical(a.x1 / W, a.y1 / H);
+      const p2 = fractionToPhysical(a.x2 / W, a.y2 / H);
+      resolved.push({ type: "drag", x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y });
     } else if (a.type === "ui_invoke" || a.type === "ui_click" || a.type === "ui_type") {
       const el = byRef(a.ref);
       if (!el) continue; // stale ref → drop
+      const cx = Math.round(el.x + el.w / 2); // element center (physical px)
+      const cy = Math.round(el.y + el.h / 2);
       if (a.type === "ui_type") {
         // Guard 1 — never type into a non-editable control (a button/icon/tab has
         // no Value pattern and an edit/text/combo/document type). Skip + re-plan.
@@ -967,15 +1038,29 @@ function resolvePlan(actions, elements, goal, imageWidth, imageHeight) {
           console.warn(`[lazy-ai] control: blocked ui_type into non-editable "${el.name}" (${el.type})`);
           continue;
         }
-        // Guard 2 — when the goal is to send a message, never type it into a field
-        // named like a search box. The message belongs in the compose field.
-        if (messaging && /search|find/i.test(`${el.name || ""} ${el.id || ""}`)) {
-          console.warn(`[lazy-ai] control: blocked message ui_type into search field "${el.name}"`);
+        const searchField = /search|find/i.test(`${el.name || ""} ${el.id || ""}`);
+        const echo = copyPaste && echoesGoal(a.text, goal);
+        // Guard 2 — a SEARCH/FIND box takes a short navigational QUERY (a name to look
+        // up), never the message/payload you intend to SEND. So allow a short query, but
+        // refuse to dump the command (echo) or a whole message into search — that belongs
+        // in the compose field. (Previously this blocked ALL typing into search, which
+        // also killed the legitimate contact lookup → the search-never-runs → loop bug.)
+        if (searchField && (messaging || copyPaste) && (echo || goalWords(a.text).length >= 6 || String(a.text || "").length > 40)) {
+          console.warn(`[lazy-ai] control: blocked non-query ui_type into search field "${el.name}"`);
+          continue;
+        }
+        // Guard 3 — anti-regurgitation at the DESTINATION (the "it sends the prompt I
+        // requested" bug). The model can't see the copied payload, so it sometimes types
+        // the command into the compose field. Replace that with a PASTE of the real
+        // clipboard, into THIS same field — but only for a genuine destination, never a
+        // search box (a payload must never be pasted into search; that case is dropped above).
+        if (echo && !searchField) {
+          console.warn(`[lazy-ai] control: goal-echo ui_type into "${el.name}" → focus + paste (ctrl+v)`);
+          resolved.push({ type: "uia", verb: "click", x: cx, y: cy }); // focus the field
+          resolved.push({ type: "press", send: "^v" }); // paste copied data at its destination
           continue;
         }
       }
-      const cx = Math.round(el.x + el.w / 2); // element center (physical px)
-      const cy = Math.round(el.y + el.h / 2);
       if (a.type === "ui_click") resolved.push({ type: "uia", verb: "click", x: cx, y: cy });
       else if (a.type === "ui_invoke") resolved.push({ type: "uia", verb: "invoke", id: el.id, name: el.name, x: cx, y: cy });
       else resolved.push({ type: "uia", verb: "settext", id: el.id, name: el.name, x: cx, y: cy, text: a.text });
@@ -987,7 +1072,10 @@ function resolvePlan(actions, elements, goal, imageWidth, imageHeight) {
 // Budget a timeout that covers the plan's own waits plus per-action overhead.
 function planTimeoutMs(actions) {
   const waits = actions.reduce((sum, a) => sum + (a.type === "wait" ? a.ms : 0), 0);
-  return Math.min(45000, 8000 + waits + actions.length * 500);
+  // Each "launch" may poll up to ~9s for the app's window to appear (Wait-ForAppWindow),
+  // so budget for that on top of the plan's own waits — else execFile kills mid-launch.
+  const launches = actions.filter((a) => a.type === "launch").length;
+  return Math.min(60000, 8000 + waits + launches * 10000 + actions.length * 500);
 }
 
 async function controlTurn({ useExistingShot }) {
@@ -1075,6 +1163,10 @@ async function controlTurn({ useExistingShot }) {
     if (SPATIAL_TYPES.includes(a.type)) {
       // a.x/a.y are already pixels in the screenshot frame = overlay-canvas space.
       draw.push({ shape: "circle", x: Math.round(a.x), y: Math.round(a.y), r, label: a.type });
+    } else if (a.type === "drag") {
+      // Endpoints are screenshot pixels = canvas space; show the stroke + its end.
+      draw.push({ shape: "line", from: [Math.round(a.x1), Math.round(a.y1)], to: [Math.round(a.x2), Math.round(a.y2)] });
+      draw.push({ shape: "circle", x: Math.round(a.x2), y: Math.round(a.y2), r, label: "drag" });
     } else if (a.type === "ui_invoke" || a.type === "ui_click" || a.type === "ui_type") {
       const el = controlElements.find((e) => e.idx === a.ref);
       if (el) {
@@ -1097,7 +1189,7 @@ async function controlTurn({ useExistingShot }) {
     controlTimer = null;
     if (!controlActive) return;
     try {
-      await winAutomation.performPlan(resolved, planTimeoutMs(plan.actions), targetHwnd);
+      await winAutomation.performPlan(resolved, planTimeoutMs(plan.actions), targetHwnd, overlayHwnd());
     } catch (err) {
       sendOverlayStatus(`Action failed: ${String(err.message || err)}`, "err");
       stopControl();

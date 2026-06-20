@@ -98,12 +98,13 @@ function composeSendKeys(combo) {
 // coords are PHYSICAL pixels, "press" carries a `send` SendKeys string. The plan
 // is handed over via a temp JSON file (safe for arbitrary text). `timeoutMs`
 // should budget for the plan's own waits.
-async function performPlan(actions, timeoutMs = 20000, targetHwnd = 0) {
+async function performPlan(actions, timeoutMs = 20000, targetHwnd = 0, overlayHwnd = 0) {
   if (!isWindows) throw new Error("Screen Control is Windows-only (PowerShell automation).");
   const file = path.join(os.tmpdir(), `lazy-ai-plan-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
   await fs.promises.writeFile(file, JSON.stringify(actions || []), "utf8");
   const args = ["-PlanFile", file];
-  if (targetHwnd) args.push("-TargetHwnd", String(targetHwnd)); // for UIA re-find
+  if (targetHwnd) args.push("-TargetHwnd", String(targetHwnd)); // for UIA re-find + focus-verify
+  if (overlayHwnd) args.push("-OverlayHwnd", String(overlayHwnd)); // never treat our overlay as the target
   try {
     await runScript(BATCH_SCRIPT, args, timeoutMs);
   } finally {
