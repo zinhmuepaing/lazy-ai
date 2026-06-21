@@ -1,4 +1,4 @@
-// Lazy AI — settings store (main process, Stage 3).
+// Lizzie — settings store (main process, Stage 3).
 //
 // Persists user settings to a JSON file in Electron's userData dir (no extra
 // dependency). API keys are encrypted at rest with the OS keychain via

@@ -34,7 +34,7 @@ function setStatus(msg, kind = "") {
 
 function showActiveHotkey(pretty) {
   els.activeHotkey.textContent = pretty
-    ? `Working now: press ${pretty} anywhere to summon Lazy AI.`
+    ? `Working now: press ${pretty} anywhere to summon Lizzie.`
     : "No hotkey active — open from the tray icon instead.";
 }
 
@@ -125,11 +125,11 @@ els.saveBtn.addEventListener("click", async () => {
   } else if (!result.gotRequestedHotkey) {
     // Their chosen key was taken by another app, so we kept a working fallback.
     setStatus(
-      `Saved — but ${result.prettyRequestedHotkey} is already used by another app, so Lazy AI is still on ${result.prettyActiveHotkey}. Pick a different key if you want to change it.`,
+      `Saved — but ${result.prettyRequestedHotkey} is already used by another app, so Lizzie is still on ${result.prettyActiveHotkey}. Pick a different key if you want to change it.`,
       "err"
     );
   } else {
-    setStatus(`Saved. Press ${result.prettyActiveHotkey} anywhere to summon Lazy AI.`, "ok");
+    setStatus(`Saved. Press ${result.prettyActiveHotkey} anywhere to summon Lizzie.`, "ok");
   }
 });
 

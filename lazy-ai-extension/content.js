@@ -1,6 +1,6 @@
-// Lazy AI extension — content script (the in-tab UX).
+// Lizzie extension — content script (the in-tab UX).
 //
-// Adds a floating Lazy AI button. When clicked (or the toolbar icon is used), it
+// Adds a floating Lizzie button. When clicked (or the toolbar icon is used), it
 // reads the text from the focused input/textarea/contenteditable, sends it to
 // the desktop app via the background worker, shows the polished result in a
 // panel, and can replace the text in place.
@@ -65,10 +65,10 @@
   // ---- UI -----------------------------------------------------------------
   const btn = document.createElement("button");
   btn.id = "lazy-ai-fab";
-  btn.title = "Lazy AI — polish the focused text box";
+  btn.title = "Lizzie — polish the focused text box";
   // Relative URLs in injected CSS resolve against the page's domain, not the
   // extension. chrome.runtime.getURL() gives the correct extension-local URL.
-  btn.style.backgroundImage = `url("${chrome.runtime.getURL("icon.png")}")`;
+  btn.style.backgroundImage = `url("${chrome.runtime.getURL("Lizzie_Logo.png")}")`;
   document.body.appendChild(btn);
 
   const panel = document.createElement("div");
@@ -78,7 +78,7 @@
     <div class="la-head">
       <span class="la-brand">
         <img class="la-logo" alt="" />
-        <span class="la-wordmark">Lazy AI</span>
+        <span class="la-wordmark">Lizzie</span>
       </span>
       <div class="la-model-dd">
         <button type="button" class="la-model-trigger" aria-haspopup="listbox" aria-expanded="false">
@@ -111,7 +111,7 @@
   `;
   // Brand logo (extension-local asset; resolves to a chrome-extension:// URL).
   const logoEl = panel.querySelector(".la-logo");
-  if (logoEl) logoEl.src = chrome.runtime.getURL("icon.png");
+  if (logoEl) logoEl.src = chrome.runtime.getURL("Lizzie_Logo.png");
   document.body.appendChild(panel);
 
   // ---- Model picker (custom dropdown with provider brand icons) ----------
@@ -225,7 +225,7 @@
     // undefined and any sendMessage throws "Extension context invalidated".
     // Detect it and tell the user to refresh instead of crashing.
     if (!chrome.runtime?.id) {
-      setStatus("Lazy AI was updated — refresh this page (Ctrl+R) to reconnect.", "err");
+      setStatus("Lizzie was updated — refresh this page (Ctrl+R) to reconnect.", "err");
       return;
     }
 
@@ -249,7 +249,7 @@
         }
       );
     } catch (err) {
-      setStatus("Lazy AI was updated — refresh this page (Ctrl+R) to reconnect.", "err");
+      setStatus("Lizzie was updated — refresh this page (Ctrl+R) to reconnect.", "err");
     }
   }
 

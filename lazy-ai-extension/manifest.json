@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Lazy AI",
+  "name": "Lizzie",
   "version": "0.1.0",
-  "description": "Polish your messy prompts in place — without leaving the tab. Talks to the Lazy AI desktop app.",
+  "description": "Polish your messy prompts in place — without leaving the tab. Talks to the Lizzie desktop app.",
   "permissions": ["storage"],
   "host_permissions": ["http://localhost:8788/*"],
   "background": {
@@ -10,7 +10,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["icon.png"],
+      "resources": ["Lizzie_Logo.png"],
       "matches": ["<all_urls>"]
     }
   ],
@@ -23,16 +23,16 @@
     }
   ],
   "icons": {
-    "16": "icon.png",
-    "48": "icon.png",
-    "128": "icon.png"
+    "16": "Lizzie_Logo.png",
+    "48": "Lizzie_Logo.png",
+    "128": "Lizzie_Logo.png"
   },
   "action": {
-    "default_title": "Lazy AI — polish the focused text box",
+    "default_title": "Lizzie — polish the focused text box",
     "default_icon": {
-      "16": "icon.png",
-      "48": "icon.png",
-      "128": "icon.png"
+      "16": "Lizzie_Logo.png",
+      "48": "Lizzie_Logo.png",
+      "128": "Lizzie_Logo.png"
     }
   }
 }

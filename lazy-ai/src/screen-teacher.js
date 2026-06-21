@@ -1,4 +1,4 @@
-// Lazy AI — Screen Teacher engine (Stage 4).
+// Lizzie — Screen Teacher engine (Stage 4).
 //
 // Takes a screenshot (base64 PNG) plus a question, asks Claude (vision) to
 // answer AND return structured drawing instructions, and parses those

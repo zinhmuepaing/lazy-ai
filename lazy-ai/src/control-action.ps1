@@ -1,4 +1,4 @@
-# Lazy AI — Screen Control action (Stage 5).
+# Lizzie — Screen Control action (Stage 5).
 #
 # Performs ONE low-level input action via Win32 user32.dll: move/click/scroll the
 # mouse at physical screen pixels, type text, or open an app. Made per-monitor

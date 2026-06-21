@@ -1,4 +1,4 @@
-# Lazy AI — capture the foreground window and copy the current selection.
+# Lizzie — capture the foreground window and copy the current selection.
 #
 # Run while the user's source app is still focused (our popup is hidden at this
 # point). Records the foreground window handle so we can paste back into it

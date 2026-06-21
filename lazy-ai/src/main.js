@@ -1,4 +1,4 @@
-// Lazy AI — Electron main process.
+// Lizzie — Electron main process.
 //
 // Holds the API keys (from .env) and owns the shared polish engine. Exposes it
 // two ways:
@@ -298,8 +298,8 @@ function createWindow() {
     resizable: true,
     skipTaskbar: true,
     alwaysOnTop: true,
-    title: "Lazy AI",
-    icon: path.join(__dirname, "..", "assets", "icon.png"),
+    title: "Lizzie",
+    icon: path.join(__dirname, "..", "assets", "Lizzie_Logo.png"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -384,18 +384,18 @@ async function summon() {
 function applyTrayMenu() {
   if (!tray) return;
   const hotkeyLabel = activeHotkey ? prettyHotkey(activeHotkey) : "no hotkey — set one in Settings";
-  tray.setToolTip(`Lazy AI — press ${hotkeyLabel}`);
+  tray.setToolTip(`Lizzie — press ${hotkeyLabel}`);
   const screenLabel = activeScreenHotkey ? prettyHotkey(activeScreenHotkey) : "no hotkey";
   const controlLabel = activeControlHotkey ? prettyHotkey(activeControlHotkey) : "no hotkey";
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: `Open Lazy AI  (${hotkeyLabel})`, click: () => showPopup() },
+      { label: `Open Lizzie  (${hotkeyLabel})`, click: () => showPopup() },
       { label: `Ask about my screen  (${screenLabel})`, click: () => showScreenTeacher() },
       { label: `Control my screen  (${controlLabel})`, click: () => showScreenControl() },
       { label: "Settings…", click: openSettings },
       { type: "separator" },
       {
-        label: "Quit Lazy AI",
+        label: "Quit Lizzie",
         click: () => {
           app.isQuitting = true;
           app.quit();
@@ -407,7 +407,7 @@ function applyTrayMenu() {
 
 function createTray() {
   const icon = nativeImage
-    .createFromPath(path.join(__dirname, "..", "assets", "icon.png"))
+    .createFromPath(path.join(__dirname, "..", "assets", "Lizzie_Logo.png"))
     .resize({ width: 16, height: 16 });
   tray = new Tray(icon);
   // Left-click the tray icon toggles the popup (no selection grab — the source
@@ -426,8 +426,8 @@ function openSettings() {
   settingsWindow = new BrowserWindow({
     width: 460,
     height: 640,
-    title: "Lazy AI — Settings",
-    icon: path.join(__dirname, "..", "assets", "icon.png"),
+    title: "Lizzie — Settings",
+    icon: path.join(__dirname, "..", "assets", "Lizzie_Logo.png"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,

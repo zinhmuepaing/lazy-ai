@@ -1,4 +1,4 @@
-# Lazy AI - UI Automation query (Stage 5.4).
+# Lizzie - UI Automation query (Stage 5.4).
 #
 # Returns the foreground window's named, on-screen, actionable controls as JSON,
 # so the model can reference real UI elements by name instead of guessing pixels.

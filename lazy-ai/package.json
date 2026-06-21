@@ -1,7 +1,7 @@
 {
   "name": "lazy-ai",
   "version": "0.1.0",
-  "description": "Lazy AI — an always-on AI overlay companion for Windows. Stage 2: Prompt Polisher.",
+  "description": "Lizzie — an always-on AI overlay companion for Windows. Stage 2: Prompt Polisher.",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",

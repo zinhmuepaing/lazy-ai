@@ -1,4 +1,4 @@
-// Lazy AI — shared polishing engine.
+// Lizzie — shared polishing engine.
 //
 // This is the single "brain." It's used in two places:
 //   1. The Electron IPC handlers (the desktop window / floating popup).

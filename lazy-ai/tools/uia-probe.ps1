@@ -1,4 +1,4 @@
-# Lazy AI - UI Automation probe (Stage 5.4 feasibility check).
+# Lizzie - UI Automation probe (Stage 5.4 feasibility check).
 #
 # Dumps what Windows UI Automation (UIA) exposes for the FOREGROUND window, so we
 # can decide whether "name the target -> resolve via UIA" is viable for a given app

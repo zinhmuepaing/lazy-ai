@@ -1,4 +1,4 @@
-// Lazy AI — Windows keyboard/window automation (Stage 3).
+// Lizzie — Windows keyboard/window automation (Stage 3).
 //
 // Thin wrappers around two PowerShell scripts that use Win32 user32.dll +
 // SendKeys to (a) copy the current selection while recording which app window

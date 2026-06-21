@@ -220,3 +220,50 @@ els.useBtn.addEventListener("click", () => {
 
 loadModels();
 window.lazyAI.onSettingsUpdated(loadModels); // re-sync default model after Settings save
+
+// ---- Hero typing animation (cycles taglines under the logo) ---------------
+// Types out, holds, erases, and moves to the next phrase — looping forever.
+// Pure setTimeout chain (no library); writes plain text into #typed while the
+// CSS caret blinks beside it.
+(function runTypingAnimation() {
+  const el = document.getElementById("typed");
+  if (!el) return;
+  const PHRASES = [
+    "Meet Lizzie...",
+    "Understands everything on your screen",
+    "Your autopilot for executing tasks",
+  ];
+  const TYPE_MS = 55; // per character while typing
+  const ERASE_MS = 28; // per character while erasing
+  const HOLD_MS = 1600; // pause once a phrase is fully typed
+  const GAP_MS = 350; // pause after erasing, before the next phrase
+
+  let phrase = 0;
+  let chars = 0;
+  let erasing = false;
+
+  function tick() {
+    const text = PHRASES[phrase];
+    if (!erasing) {
+      chars += 1;
+      el.textContent = text.slice(0, chars);
+      if (chars >= text.length) {
+        erasing = true;
+        setTimeout(tick, HOLD_MS);
+      } else {
+        setTimeout(tick, TYPE_MS);
+      }
+    } else {
+      chars -= 1;
+      el.textContent = text.slice(0, Math.max(0, chars));
+      if (chars <= 0) {
+        erasing = false;
+        phrase = (phrase + 1) % PHRASES.length;
+        setTimeout(tick, GAP_MS);
+      } else {
+        setTimeout(tick, ERASE_MS);
+      }
+    }
+  }
+  tick();
+})();

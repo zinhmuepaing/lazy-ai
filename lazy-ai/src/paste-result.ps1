@@ -1,4 +1,4 @@
-# Lazy AI — restore focus to the source window and paste the polished result.
+# Lizzie — restore focus to the source window and paste the polished result.
 #
 # Takes the window handle captured by grab-selection.ps1. The Electron main
 # process has already put the polished text on the clipboard; here we bring the

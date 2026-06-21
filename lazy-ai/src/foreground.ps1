@@ -1,4 +1,4 @@
-# Lazy AI - print the current foreground window handle (Stage 5.4).
+# Lizzie - print the current foreground window handle (Stage 5.4).
 # Captured at Screen Control summon (BEFORE our overlay steals focus) so we know
 # the target app window even once our overlay is foreground.
 

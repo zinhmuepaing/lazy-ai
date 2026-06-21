@@ -1,4 +1,4 @@
-// Lazy AI extension — background service worker.
+// Lizzie extension — background service worker.
 //
 // The only job: relay polish requests from the content script to the local
 // desktop server. The content script can't reach localhost directly (page CORS),
@@ -21,7 +21,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         ok: false,
         error:
           String(e.message || e) +
-          " — is the Lazy AI desktop app running? (it hosts localhost:8788)",
+          " — is the Lizzie desktop app running? (it hosts localhost:8788)",
       })
     );
 

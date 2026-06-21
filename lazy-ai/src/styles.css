@@ -1,4 +1,4 @@
-/* Lazy AI — summon popup + settings window. "Apple Minimalist Liquid Glass":
+/* Lizzie — summon popup + settings window. "Apple Minimalist Liquid Glass":
    an aurora-tinted parchment canvas with frosted-glass cards. These windows are
    opaque (createWindow has no transparent:true), so the glass frosts an in-page
    aurora gradient rather than the live desktop — the same Apple material,
@@ -102,14 +102,40 @@ button, textarea, input, select { -webkit-app-region: no-drag; }
   padding: 2px 0 4px;
   -webkit-app-region: drag;
 }
-.hero .logo { width: 46px; height: 46px; border-radius: 12px; }
+/* Logo at full scale — object-fit:contain shows the whole mark without cropping
+   or distortion, so it no longer looks shrunken inside a tiny rounded box. */
+.hero .logo {
+  width: 76px;
+  height: 76px;
+  object-fit: contain;
+  border-radius: 0;
+}
+/* Typing-animation wordmark (renderer.js cycles taglines into #typed). Height is
+   reserved for ~2 lines so the composer below doesn't jump as phrases change. */
 .wordmark {
   margin: 0;
-  font-size: 27px;
+  font-size: 19px;
   font-weight: 600;
-  letter-spacing: -0.5px;
-  color: var(--accent); /* "Lazy AI" in coral */
+  letter-spacing: -0.3px;
+  line-height: 1.35;
+  color: var(--accent); /* brand wordmark + typing line in coral */
+  text-align: center;
+  max-width: 320px;
+  min-height: 2.7em;
 }
+.typed { white-space: pre-wrap; }
+/* Blinking caret trailing the typed text */
+.caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--accent);
+  border-radius: 1px;
+  animation: caret-blink 1s steps(1) infinite;
+}
+@keyframes caret-blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
 
 /* Chat-style composer card */
 .composer {
@@ -445,6 +471,8 @@ main {
   margin-top: 4px;
 }
 .field-label.inline { margin: 0; }
+/* Two-word feature names (DeskTutor / DeskPilot) accent their second word via <b>. */
+.field-label b { color: var(--accent); font-weight: 600; }
 .optional { font-weight: 400; color: var(--ink-muted); }
 
 textarea, input[type="text"], input[type="password"], select {

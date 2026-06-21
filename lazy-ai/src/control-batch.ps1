@@ -1,4 +1,4 @@
-# Lazy AI — Screen Control batch executor (Stage 5.5 — verify-first focus).
+# Lizzie — Screen Control batch executor (Stage 5.5 — verify-first focus).
 #
 # Performs a whole PLAN of input actions in ONE PowerShell process (so we pay the
 # Add-Type compile + process spawn ONCE per plan, not once per action — the key to

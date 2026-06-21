@@ -1,4 +1,4 @@
-# Lazy AI
+# Lizzie
 
 An always-on AI overlay companion for **Windows** that does the tedious work so you don't
 have to.
@@ -8,9 +8,9 @@ have to.
 
 1. **Prompt Polisher** *(built)* — rewrite messy prompts into clean, structured,
    token-efficient ones, in place, without switching tabs.
-2. **Screen Teacher** *(planned)* — hotkey → screenshot → voice/text question → Claude
+2. **DeskTutor** *(planned)* — hotkey → screenshot → voice/text question → Claude
    answers with annotations drawn on screen.
-3. **Screen Control** *(planned)* — voice command → app clicks/opens things for you.
+3. **DeskPilot** *(planned)* — voice command → app clicks/opens things for you.
 
 ## Architecture: "two faces, one brain"
 
@@ -50,7 +50,7 @@ Add `GEMINI_API_KEY` / `OPENAI_API_KEY` to use the other dropdown options.
 1. Open `chrome://extensions` (or `edge://extensions`).
 2. Enable **Developer mode** (top-right).
 3. **Load unpacked** → select the `lazy-ai-extension` folder.
-4. On any page with a text box, click the floating Lazy AI button, review the polished
+4. On any page with a text box, click the floating Lizzie button, review the polished
    prompt, and hit **Replace**.
 
 The desktop app must be running — it's the brain the extension calls.
@@ -69,4 +69,4 @@ fix the `apiModel` value there (ids use dashes, not dots).
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Original Lazy AI by [@Paing](https://github.com/zinhmuepaing).
+MIT — see [LICENSE](LICENSE). Original Lizzie by [@Paing](https://github.com/zinhmuepaing).

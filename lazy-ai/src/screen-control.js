@@ -1,4 +1,4 @@
-// Lazy AI — Screen Control engine (Stage 5, fast path 5.3).
+// Lizzie — Screen Control engine (Stage 5, fast path 5.3).
 //
 // Turns a command + screenshot into a PLAN: an ordered batch of input actions to
 // run in one shot. Keyboard-first (launch apps, press shortcuts, type) with a

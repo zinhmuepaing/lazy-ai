@@ -1,4 +1,4 @@
-# Lazy AI — Screen Teacher OCR (Sonnet line-snapping).
+# Lizzie — Screen Teacher OCR (Sonnet line-snapping).
 #
 # Runs the built-in Windows.Media.Ocr engine over a PNG and prints the text lines
 # it found, each with its pixel bounding box, as a compact JSON array:

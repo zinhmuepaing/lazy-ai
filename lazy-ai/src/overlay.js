@@ -582,7 +582,7 @@ window.lazyAI.onOverlayShow((data) => {
   clearCanvas();
   setAnswer("", "");
   // Reflect the mode in the bar so it's obvious whether it will ACT or EXPLAIN.
-  if (barTitle) barTitle.innerHTML = overlayMode === "control" ? "Screen<b>Control</b>" : "Screen<b>Teacher</b>";
+  if (barTitle) barTitle.innerHTML = overlayMode === "control" ? "Desk<b>Pilot</b>" : "Desk<b>Tutor</b>";
   els.askBtn.title = overlayMode === "control" ? "Do it" : "Ask";
   els.question.placeholder =
     overlayMode === "control"

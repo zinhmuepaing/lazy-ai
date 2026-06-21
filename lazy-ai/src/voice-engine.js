@@ -1,4 +1,4 @@
-// Lazy AI — local speech-to-text (Stage 4.2).
+// Lizzie — local speech-to-text (Stage 4.2).
 //
 // Runs OpenAI Whisper locally via Transformers.js (pure JS + prebuilt ONNX
 // runtime — no compiler, no ffmpeg). The model (~140 MB, English) downloads
