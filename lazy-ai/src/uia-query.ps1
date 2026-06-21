@@ -8,11 +8,32 @@
 # -ExcludeHwnd: if the foreground window is this handle (our own overlay), returns
 # an empty list (the overlay isn't a target).
 
-param([long]$ExcludeHwnd = 0, [long]$FallbackHwnd = 0, [int]$Max = 80)
+param([long]$ExcludeHwnd = 0, [long]$FallbackHwnd = 0, [int]$Max = 80, [switch]$SkipWake)
+
+# Compile the inline P/Invoke C# ONCE to a cached DLL, then load it with -Path on
+# later runs (recompiling the same C# via csc each call costs ~200-500ms). Keyed by
+# an MD5 of the source, so editing the C# rebuilds automatically. Any failure falls
+# back to inline compile (the original behavior), so this can never break a run.
+function Use-CachedTypes([string]$Src, [string]$Tag) {
+  $dll = $null
+  try {
+    $dir = Join-Path $env:LOCALAPPDATA 'lazy-ai'
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $md5 = [Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($Src))
+    $key = ([BitConverter]::ToString($md5)).Replace('-','').Substring(0,12)
+    $dll = Join-Path $dir ("native-$Tag-$key.dll")
+    if (-not (Test-Path $dll)) { Add-Type -TypeDefinition $Src -OutputAssembly $dll -OutputType Library -ErrorAction Stop }
+    Add-Type -Path $dll -ErrorAction Stop
+    return
+  } catch {
+    if ($dll) { try { Remove-Item -LiteralPath $dll -Force -ErrorAction SilentlyContinue } catch {} }
+  }
+  Add-Type -TypeDefinition $Src   # fallback: inline compile (original behavior)
+}
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
-Add-Type @"
+$fgSrc = @"
 using System;
 using System.Text;
 using System.Runtime.InteropServices;
@@ -24,6 +45,7 @@ public static class Fg {
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 }
 "@
+Use-CachedTypes $fgSrc 'fg'
 try { [void][Fg]::SetProcessDpiAwarenessContext([IntPtr](-4)) } catch { try { [void][Fg]::SetProcessDPIAware() } catch {} }
 
 # Use the live foreground window, unless it's our overlay (or none) -> fall back
@@ -57,7 +79,7 @@ $isBrowser = $pname -match '^(chrome|msedge|firefox|brave|opera|vivaldi|chromium
 # elements so both cases behave the same. (Electron/WebView2 desktop apps below still
 # get the a11y wake — their whole UI lives in that tree and its rects are stable.)
 if ($isBrowser) {
-  Write-Output ('{"hwnd":' + [long]$h + ',"elements":[]}')
+  Write-Output ('{"hwnd":' + [long]$h + ',"browser":true,"elements":[]}')
   exit 0
 }
 
@@ -66,7 +88,7 @@ if ($isBrowser) {
 # app's controls (contact rows, message box, buttons) show up instead of nothing.
 $cn = New-Object System.Text.StringBuilder 256
 [void][Fg]::GetClassName($h, $cn, $cn.Capacity)
-if ($cn.ToString() -match "Chrome_WidgetWin|Edge|WebView") {
+if (-not $SkipWake -and $cn.ToString() -match "Chrome_WidgetWin|Edge|WebView") {
   try { [void]$root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition) } catch {}
   Start-Sleep -Milliseconds 700
   $root = $A::FromHandle($h)
@@ -121,4 +143,4 @@ foreach ($e in $all) {
 }
 
 $joined = $items -join ","
-Write-Output ('{"hwnd":' + [long]$h + ',"elements":[' + $joined + ']}')
+Write-Output ('{"hwnd":' + [long]$h + ',"browser":false,"elements":[' + $joined + ']}')

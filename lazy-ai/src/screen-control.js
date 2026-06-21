@@ -329,6 +329,13 @@ async function planActions({ imageBase64, mediaType = "image/png", command, imag
       body: JSON.stringify({
         model: useModel,
         max_tokens: 1024,
+        // Action planning is grounded in the UIA element list, not deep reasoning, so
+        // we turn OFF adaptive thinking (valid on Sonnet 4.6) and run at low effort.
+        // This removes the reasoning-token latency that preceded the JSON and the
+        // mid-JSON truncation it caused (salvageJson stays as a rare safety net). The
+        // system prompt already instructs "no thinking … first character must be {".
+        thinking: { type: "disabled" },
+        output_config: { effort: "low" },
         system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
         // Phase 2 — token discipline WITHOUT prefill. Sonnet 4.6 rejects assistant
         // message prefill ("the conversation must end with a user message"), so we

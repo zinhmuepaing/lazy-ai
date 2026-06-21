@@ -20,7 +20,29 @@
 
 param([string]$PlanFile, [long]$TargetHwnd = 0, [long]$OverlayHwnd = 0)
 
-Add-Type @"
+# Compile the inline P/Invoke C# ONCE to a cached DLL, then load it with -Path on
+# later runs. Every batch is a fresh process, and recompiling the same C# via csc
+# each call costs ~200-500ms. Keyed by an MD5 of the source, so editing the C#
+# rebuilds automatically. Any failure falls back to inline compile (the original
+# behavior), so this can never break a run.
+function Use-CachedTypes([string]$Src, [string]$Tag) {
+  $dll = $null
+  try {
+    $dir = Join-Path $env:LOCALAPPDATA 'lazy-ai'
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $md5 = [Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($Src))
+    $key = ([BitConverter]::ToString($md5)).Replace('-','').Substring(0,12)
+    $dll = Join-Path $dir ("native-$Tag-$key.dll")
+    if (-not (Test-Path $dll)) { Add-Type -TypeDefinition $Src -OutputAssembly $dll -OutputType Library -ErrorAction Stop }
+    Add-Type -Path $dll -ErrorAction Stop
+    return
+  } catch {
+    if ($dll) { try { Remove-Item -LiteralPath $dll -Force -ErrorAction SilentlyContinue } catch {} }
+  }
+  Add-Type -TypeDefinition $Src   # fallback: inline compile (original behavior)
+}
+
+$lazyCtlSrc = @"
 using System;
 using System.Runtime.InteropServices;
 public static class LazyCtl {
@@ -41,6 +63,7 @@ public static class LazyCtl {
   public const uint LEFTDOWN=0x0002, LEFTUP=0x0004, RIGHTDOWN=0x0008, RIGHTUP=0x0010, WHEEL=0x0800;
 }
 "@
+Use-CachedTypes $lazyCtlSrc 'ctl'
 
 # EnumWindows-based window discovery. This is the ROBUST replacement for the old
 # Get-Process.MainWindowHandle scan, which returned stale/zero handles for multi-
@@ -48,7 +71,7 @@ public static class LazyCtl {
 # walk the window manager's top-level windows (top of Z-order first) and map each to
 # its owning process by PID, so "is Chrome open, and which window?" is answered by
 # the same source the OS uses to draw the screen.
-Add-Type @"
+$lazyWinSrc = @"
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -111,6 +134,7 @@ public static class LazyWin {
   }
 }
 "@
+Use-CachedTypes $lazyWinSrc 'win'
 
 Add-Type -AssemblyName System.Windows.Forms
 # UI Automation (Stage 5.4): act on real elements by name/id, not pixels.

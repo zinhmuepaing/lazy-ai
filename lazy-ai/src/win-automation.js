@@ -128,18 +128,20 @@ async function getForegroundWindow() {
 // window, but if that's our overlay (excludeHwnd) or none, falls back to the
 // known target (fallbackHwnd) — so an already-open app is still seen. Returns
 // { hwnd, elements } (elements have PHYSICAL-pixel rects), or { hwnd:0, elements:[] }.
-async function queryUiElements(excludeHwnd = 0, fallbackHwnd = 0, max = 80) {
-  if (!isWindows) return { hwnd: 0, elements: [] };
+async function queryUiElements(excludeHwnd = 0, fallbackHwnd = 0, max = 80, skipWake = false) {
+  if (!isWindows) return { hwnd: 0, elements: [], browser: false };
   try {
-    const out = await runScript(
-      UIA_QUERY_SCRIPT,
-      ["-ExcludeHwnd", String(excludeHwnd || 0), "-FallbackHwnd", String(fallbackHwnd || 0), "-Max", String(max)],
-      10000
-    );
+    const args = ["-ExcludeHwnd", String(excludeHwnd || 0), "-FallbackHwnd", String(fallbackHwnd || 0), "-Max", String(max)];
+    if (skipWake) args.push("-SkipWake"); // a11y tree already woken this session → skip the 700ms wait
+    const out = await runScript(UIA_QUERY_SCRIPT, args, 10000);
     const data = JSON.parse(out);
-    return { hwnd: Number(data.hwnd) || 0, elements: Array.isArray(data.elements) ? data.elements : [] };
+    return {
+      hwnd: Number(data.hwnd) || 0,
+      elements: Array.isArray(data.elements) ? data.elements : [],
+      browser: !!data.browser,
+    };
   } catch {
-    return { hwnd: 0, elements: [] };
+    return { hwnd: 0, elements: [], browser: false };
   }
 }
 

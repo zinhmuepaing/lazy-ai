@@ -87,6 +87,8 @@ let controlHistory = []; // Anthropic messages (text-only) across control turns
 let controlTurnCount = 0;
 let controlElements = []; // this turn's UIA element list (idx,name,type,rect,…)
 let controlTargetHwnd = 0; // the target app window (for UIA re-find at execution)
+let controlWokeHwnd = 0; // last target whose UIA a11y tree we already woke this session (skip the 700ms re-wake)
+let controlBrowserHwnd = 0; // last target detected as a real browser (skip the UIA query — it returns [] anyway)
 let controlSourceHwnd = 0; // foreground window captured at summon (the app the user was in)
 let controlSavedClipboard = null; // user's clipboard text, preserved for the whole control session
 let sourceHwnd = null; // window the selection came from, to paste back into
@@ -506,7 +508,7 @@ function currentDisplay() {
 // and clicks/annotations drift. Long-edge alone wasn't enough (1568×882 = 1.38 MP
 // is OVER the Sonnet ~1.15 MP cap). The overlay sizes its canvas to the returned
 // dimensions, so coordinates stay 1:1.
-async function captureScreen(maxLongEdge, maxPixels) {
+async function captureScreen(maxLongEdge, maxPixels, format = "png") {
   const display = currentDisplay();
   const { width, height } = display.size; // CSS pixels
   const scaleFactor = display.scaleFactor || 1;
@@ -543,9 +545,13 @@ async function captureScreen(maxLongEdge, maxPixels) {
   // downscales, these would mismatch and coords would drift — log so we can spot it.
   console.log(`[lazy-ai] capture sent ${size.width}×${size.height} (${(size.width * size.height / 1e6).toFixed(2)} MP, cap ${(MAX_PIXELS / 1e6).toFixed(2)} MP)`);
 
+  // DeskPilot uploads JPEG (much smaller payload → faster API round-trip); the
+  // Teacher path stays PNG (its OCR line-snapping reads the PNG). Either way the
+  // dimensions are unchanged, so the model's pixel coords still map 1:1.
+  const useJpeg = format === "jpeg";
   return {
-    base64: image.toPNG().toString("base64"),
-    mediaType: "image/png",
+    base64: (useJpeg ? image.toJPEG(72) : image.toPNG()).toString("base64"),
+    mediaType: useJpeg ? "image/jpeg" : "image/png",
     width: size.width,
     height: size.height,
   };
@@ -614,8 +620,10 @@ async function summonOverlay(mode) {
   // Cap the capture to the model that will process it (control → Sonnet/1568,
   // teach → the Settings model) so its coordinates map 1:1.
   const captureModel = mode === "control" ? controlModel() : activeScreenTeacherModel();
+  // Control → JPEG (small/fast upload); Teach → PNG (OCR line-snapping needs it).
+  const captureFormat = mode === "control" ? "jpeg" : "png";
   try {
-    lastScreenshot = await captureScreen(maxEdgeForModel(captureModel), maxPixelsForModel(captureModel));
+    lastScreenshot = await captureScreen(maxEdgeForModel(captureModel), maxPixelsForModel(captureModel), captureFormat);
   } catch (err) {
     console.error(`[lazy-ai] Screenshot failed: ${err.message}`);
     return;
@@ -909,7 +917,7 @@ async function runGuideTurn({ useExistingShot }) {
 // settle, re-capture and plan again. Most tasks finish in one model call + one
 // PowerShell run; vision-clicks are the fallback within the same plan.
 // ---------------------------------------------------------------------------
-const CONTROL_PREVIEW_MS = 400; // brief, cancelable preview before a batch runs
+const CONTROL_PREVIEW_MS = 120; // brief, cancelable preview before a batch runs (kept tight to cut per-step latency)
 const CONTROL_MAX_TURNS = 14; // safety cap on re-plans (multi-step app tasks need headroom)
 const SPATIAL_TYPES = ["click", "doubleclick", "rightclick", "scroll"];
 
@@ -928,13 +936,15 @@ async function startControlGoal(command) {
   controlGoal = (command || "").trim();
   controlHistory = [];
   controlTurnCount = 0;
+  controlWokeHwnd = 0; // fresh session: nothing woken / detected yet
+  controlBrowserHwnd = 0;
   controlTargetHwnd = controlSourceHwnd; // start from the app the user summoned over
   await controlTurn({ useExistingShot: true });
 }
 
 // Poll until the screen stops changing after we acted, so the UI has finished
 // updating before we decide the next step. Bounded by maxMs.
-async function waitForScreenSettle({ maxMs = 2000, interval = 250 } = {}) {
+async function waitForScreenSettle({ maxMs = 1500, interval = 120 } = {}) {
   const start = Date.now();
   let prev = await captureScreenThumbnail().catch(() => null);
   await delay(interval);
@@ -1100,14 +1110,31 @@ async function controlTurn({ useExistingShot }) {
     // Capture + UIA query in parallel (independent). queryUiElements never throws.
     // Query uses the live foreground, falling back to the known target window so
     // an already-open app is seen even while our overlay is foreground.
+    //
+    // Two per-turn PowerShell savings on later turns of the SAME window:
+    //  • known browser  → skip the UIA query entirely (it returns [] for browsers
+    //    anyway, but still pays a process cold-start).
+    //  • already-woke desktop app → pass skipWake so uia-query.ps1 omits its 700ms
+    //    a11y-wake sleep (the tree stays awake for the session once touched).
+    // Any plan with a `launch` clears these (the foreground app may have changed).
+    const sameTarget = !!controlTargetHwnd && controlTargetHwnd === controlWokeHwnd;
+    const skipQuery = !!controlTargetHwnd && controlTargetHwnd === controlBrowserHwnd;
+    const uiQuery = skipQuery
+      ? Promise.resolve({ hwnd: controlTargetHwnd, elements: [], browser: true })
+      : winAutomation.queryUiElements(overlayHwnd(), controlTargetHwnd, 80, sameTarget);
     const [s, ui] = await Promise.all([
-      useExistingShot && lastScreenshot ? Promise.resolve(lastScreenshot) : captureScreen(maxEdgeForModel(controlModel()), maxPixelsForModel(controlModel())),
-      winAutomation.queryUiElements(overlayHwnd(), controlTargetHwnd, 80),
+      useExistingShot && lastScreenshot ? Promise.resolve(lastScreenshot) : captureScreen(maxEdgeForModel(controlModel()), maxPixelsForModel(controlModel()), "jpeg"),
+      uiQuery,
     ]);
     shot = s;
     lastScreenshot = shot;
     controlElements = ui.elements || [];
-    if (ui.hwnd) controlTargetHwnd = ui.hwnd; // track the resolved target window
+    if (ui.hwnd) {
+      controlTargetHwnd = ui.hwnd; // track the resolved target window
+      controlWokeHwnd = ui.hwnd; // its a11y tree has now been queried/woken this session
+      if (ui.browser) controlBrowserHwnd = ui.hwnd; // remember browsers → skip next turn
+      else if (controlBrowserHwnd === ui.hwnd) controlBrowserHwnd = 0; // no longer a browser
+    }
   } catch (err) {
     sendOverlayStatus("Couldn't capture the screen — try again.", "err");
     stopControl();
@@ -1219,6 +1246,9 @@ async function controlTurn({ useExistingShot }) {
     }
     await waitForScreenSettle(); // let the batch's effects render before re-planning
     if (!controlActive) return;
+    // A launch may have changed which app is foreground — drop the cached woke/browser
+    // window so the next turn re-detects (re-wakes / re-checks) instead of trusting it.
+    if (plan.actions.some((a) => a.type === "launch")) { controlWokeHwnd = 0; controlBrowserHwnd = 0; }
     controlTurn({ useExistingShot: false });
   }, CONTROL_PREVIEW_MS);
 }
