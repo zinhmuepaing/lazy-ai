@@ -60,7 +60,13 @@ public static class LazyCtl {
   [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll", SetLastError=true)] public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
+  [DllImport("user32.dll")] public static extern int GetSystemMetrics(int nIndex);
+  [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
   public const uint LEFTDOWN=0x0002, LEFTUP=0x0004, RIGHTDOWN=0x0008, RIGHTUP=0x0010, WHEEL=0x0800;
+  // Absolute synthetic-move flags. A drag must feed the real mouse-move INPUT STREAM,
+  // which drawing apps sample to lay down ink; SetCursorPos teleports the cursor WITHOUT
+  // feeding it, so the button-held moves never registered as a stroke ("ghost drag").
+  public const uint MOVE=0x0001, ABSOLUTE=0x8000, VIRTUALDESK=0x4000;
 }
 "@
 Use-CachedTypes $lazyCtlSrc 'ctl'
@@ -84,6 +90,13 @@ public static class LazyWin {
   [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr h);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+
+  static string ClassOf(IntPtr h) {
+    StringBuilder sb = new StringBuilder(256);
+    GetClassName(h, sb, sb.Capacity);
+    return sb.ToString();
+  }
 
   static string Norm(string s) {
     if (s == null) return "";
@@ -105,6 +118,15 @@ public static class LazyWin {
       try {
         if (exclude != 0 && h.ToInt64() == exclude) return true;
         if (!IsWindowVisible(h)) return true;
+        string cls = ClassOf(h);
+        // Never match the desktop shell or taskbar. explorer.exe owns these, so a
+        // process-name query for "explorer"/"file explorer" used to match the Desktop
+        // ("Program Manager") and the launch then reused/focused it - new files landed
+        // on the Desktop. Skipping them forces a real File Explorer (CabinetWClass) window.
+        if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd") return true;
+        // Console windows are owned by conhost.exe, so the process-name test below never
+        // matches "cmd". Match them by window class for cmd/terminal/powershell queries.
+        if (cls == "ConsoleWindowClass" && (q == "cmd" || q == "commandprompt" || q == "terminal" || q == "powershell")) { names.Add(h); return true; }
         int len = GetWindowTextLength(h);
         if (len <= 0) return true;
         StringBuilder sb = new StringBuilder(len + 2);
@@ -131,6 +153,16 @@ public static class LazyWin {
       uint pid = 0; GetWindowThreadProcessId(h, out pid);
       return Norm(Process.GetProcessById((int)pid).ProcessName);
     } catch { return ""; }
+  }
+
+  // True if the window is the Windows shell desktop or taskbar (Program Manager / the
+  // wallpaper host / the taskbar). A pointer action whose target becomes one of these
+  // MISSED the app it meant to hit (it landed on the desktop behind a small window), so
+  // the caller aborts + re-plans instead of hammering a dead coordinate into empty space.
+  public static bool IsShell(IntPtr h) {
+    if (h == IntPtr.Zero) return false;
+    string c = ClassOf(h);
+    return c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd" || c == "Shell_SecondaryTrayWnd";
   }
 }
 "@
@@ -235,6 +267,44 @@ function Wait-ForAppWindow([string]$app, [int]$timeoutMs = 9000) {
   return [IntPtr]::Zero
 }
 
+# Is the window's UI thread pumping messages (i.e. NOT locked up loading — the "blue
+# spinner")? A cold-starting heavy app (Word) shows its window while its thread is still
+# busy initializing; WM_NULL with a short timeout returns 0 until that thread goes idle.
+function Test-Responsive([IntPtr]$hWnd) {
+  $out = [IntPtr]::Zero
+  $r = [LazyCtl]::SendMessageTimeout($hWnd, 0, [IntPtr]::Zero, [IntPtr]::Zero, 2, 300, [ref]$out)  # WM_NULL, SMTO_ABORTIFHUNG, 300ms
+  return ($r -ne [IntPtr]::Zero)
+}
+
+# A freshly launched app shows its window BEFORE it can accept input (Word's start/template
+# screen, a cold-start splash, the loading spinner). Wait until the window is BOTH foreground
+# AND responsive (its UI thread is pumping — done loading) continuously for a short STABLE
+# period, re-focusing if it drifts, capped — so the next keystrokes/paste don't fire into a
+# still-loading app. This is the cold-vs-warm Word race: Notepad is instant and passes
+# immediately; Word can take several seconds and used to slip through on foreground alone.
+function Wait-WindowReady([IntPtr]$hWnd, [int]$stableMs = 600, [int]$timeoutMs = 12000) {
+  if ($hWnd -eq [IntPtr]::Zero) { return }
+  $deadline = (Get-Date).AddMilliseconds($timeoutMs)
+  $stableSince = $null
+  while ((Get-Date) -lt $deadline) {
+    if ([LazyCtl]::GetForegroundWindow() -ne $hWnd) {
+      $stableSince = $null
+      [void](Focus-Window $hWnd)
+      Start-Sleep -Milliseconds 150
+      continue
+    }
+    if (-not (Test-Responsive $hWnd)) {   # foreground, but the UI thread is still locked loading
+      $stableSince = $null
+      Start-Sleep -Milliseconds 150
+      continue
+    }
+    if ($null -eq $stableSince) { $stableSince = Get-Date }
+    elseif (((Get-Date) - $stableSince).TotalMilliseconds -ge $stableMs) { break }
+    Start-Sleep -Milliseconds 120
+  }
+  Start-Sleep -Milliseconds 300  # final settle once ready
+}
+
 # After a mouse action (which changes focus by itself), adopt the now-foreground
 # window as the current target — unless it's our overlay. Keeps the focus we verify
 # before the next keystroke in sync with what the click actually activated.
@@ -251,6 +321,23 @@ function Left-Click {
   [LazyCtl]::mouse_event([LazyCtl]::LEFTDOWN, 0, 0, 0, [IntPtr]::Zero)
   Start-Sleep -Milliseconds 25
   [LazyCtl]::mouse_event([LazyCtl]::LEFTUP, 0, 0, 0, [IntPtr]::Zero)
+}
+
+# Virtual-desktop metrics (physical px; DPI-awareness already set above), used to
+# normalize absolute mouse moves into the 0..65535 range mouse_event expects.
+$script:VsX = [LazyCtl]::GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
+$script:VsY = [LazyCtl]::GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
+$script:VsW = [LazyCtl]::GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
+$script:VsH = [LazyCtl]::GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
+# Absolute synthetic move that feeds the real mouse-move input stream (so a held-button
+# drag actually inks). SetCursorPos can't do this - it teleports without a move event.
+function Move-Abs([int]$x, [int]$y) {
+  $nx = [int][math]::Round((($x - $script:VsX) * 65535.0) / [math]::Max(1, ($script:VsW - 1)))
+  $ny = [int][math]::Round((($y - $script:VsY) * 65535.0) / [math]::Max(1, ($script:VsH - 1)))
+  if ($nx -lt 0) { $nx = 0 } elseif ($nx -gt 65535) { $nx = 65535 }
+  if ($ny -lt 0) { $ny = 0 } elseif ($ny -gt 65535) { $ny = 65535 }
+  [LazyCtl]::mouse_event(([LazyCtl]::MOVE -bor [LazyCtl]::ABSOLUTE -bor [LazyCtl]::VIRTUALDESK), [uint32]$nx, [uint32]$ny, 0, [IntPtr]::Zero)
+  Start-Sleep -Milliseconds 5
 }
 
 # Type text by pasting it WITHOUT destroying the clipboard. A "text"/"ui_type"
@@ -313,40 +400,91 @@ foreach ($a in $plan) {
     "click" {
       Move-To ([int]$a.x) ([int]$a.y); Left-Click
       Update-Target
+      Log ("click ({0},{1}): target now {2} ({3})" -f [int]$a.x, [int]$a.y, [long]$script:CurrentTarget, [LazyWin]::ProcName($script:CurrentTarget))
+      # The click landed on the desktop/taskbar = it MISSED the app window (the app is now
+      # backgrounded). Abort so the loop re-plans from a fresh shot, instead of the next
+      # clicks in this batch hammering the same dead spot (the Clock "+ then exits" loop).
+      if ([LazyWin]::IsShell($script:CurrentTarget)) { Log ("FOCUS_ABORT: click landed on the desktop/shell (missed the app); re-planning"); $aborted = $true; break }
     }
     "doubleclick" {
       Move-To ([int]$a.x) ([int]$a.y); Left-Click; Start-Sleep -Milliseconds 60; Left-Click
       Update-Target
+      Log ("doubleclick ({0},{1}): target now {2} ({3})" -f [int]$a.x, [int]$a.y, [long]$script:CurrentTarget, [LazyWin]::ProcName($script:CurrentTarget))
+      if ([LazyWin]::IsShell($script:CurrentTarget)) { Log ("FOCUS_ABORT: doubleclick landed on the desktop/shell (missed the app); re-planning"); $aborted = $true; break }
     }
     "rightclick" {
       Move-To ([int]$a.x) ([int]$a.y)
       [LazyCtl]::mouse_event([LazyCtl]::RIGHTDOWN, 0, 0, 0, [IntPtr]::Zero)
       Start-Sleep -Milliseconds 25
       [LazyCtl]::mouse_event([LazyCtl]::RIGHTUP, 0, 0, 0, [IntPtr]::Zero)
+      Log ("rightclick ({0},{1})" -f [int]$a.x, [int]$a.y)
     }
     "scroll" {
       Move-To ([int]$a.x) ([int]$a.y)
       [LazyCtl]::mouse_event([LazyCtl]::WHEEL, 0, 0, [uint32]([int]$a.amount), [IntPtr]::Zero)
+      Log ("scroll ({0},{1}) amount {2}" -f [int]$a.x, [int]$a.y, [int]$a.amount)
     }
     "drag" {
       # Press-move-release: the only way to DRAW a stroke, move a slider, or
       # drag-and-drop. Move to the start, hold the left button, glide through
       # several intermediate points (a single jump won't register as a stroke in
       # Paint/canvas apps), then release at the end. Coords are PHYSICAL pixels.
+      $dragPrevTarget = $script:CurrentTarget
       $x1 = [int]$a.x1; $y1 = [int]$a.y1; $x2 = [int]$a.x2; $y2 = [int]$a.y2
-      Move-To $x1 $y1
+      # Use ABSOLUTE synthetic moves (not SetCursorPos) so the held-button glide feeds the
+      # real mouse-move stream that drawing apps ink from. Deliberate timing: settle after
+      # the press so the app registers the stroke start, glide through many points feeding
+      # moves, then hold briefly before release so the final segment inks.
+      Move-Abs $x1 $y1
+      Start-Sleep -Milliseconds 60
       [LazyCtl]::mouse_event([LazyCtl]::LEFTDOWN, 0, 0, 0, [IntPtr]::Zero)
-      Start-Sleep -Milliseconds 40
-      $steps = 24
+      Start-Sleep -Milliseconds 90
+      $steps = 36
       for ($i = 1; $i -le $steps; $i++) {
         $ix = [int]($x1 + ($x2 - $x1) * $i / $steps)
         $iy = [int]($y1 + ($y2 - $y1) * $i / $steps)
-        [void][LazyCtl]::SetCursorPos($ix, $iy)
-        Start-Sleep -Milliseconds 12
+        Move-Abs $ix $iy
+        Start-Sleep -Milliseconds 16
       }
-      Start-Sleep -Milliseconds 40
+      Start-Sleep -Milliseconds 90
       [LazyCtl]::mouse_event([LazyCtl]::LEFTUP, 0, 0, 0, [IntPtr]::Zero)
       Update-Target
+      Log ("drag ({0},{1})->({2},{3}): target now {4}" -f $x1, $y1, $x2, $y2, [long]$script:CurrentTarget)
+      if ([LazyWin]::IsShell($script:CurrentTarget)) {
+        # The drag slipped onto the desktop (it never selected anything in the app) - the
+        # Chrome lyrics "select, exit, repeat" loop. Abort + re-plan rather than copying an
+        # empty selection. (Prefer "selecttext" over "drag" for text - see the planner.)
+        Log ("FOCUS_ABORT: drag landed on the desktop/shell (missed the app); re-planning")
+        $aborted = $true; break
+      } elseif ($dragPrevTarget -ne [IntPtr]::Zero -and [long]$script:CurrentTarget -ne [long]$dragPrevTarget) {
+        # A drag that tears off a browser tab / drags a window makes a DIFFERENT (non-shell)
+        # window foreground. Don't adopt that stray window - restore the one we were driving
+        # so the next keystroke (e.g. ctrl+c) still lands in the right place.
+        Log ("drag: foreground changed (was {0}, now {1}); restoring target" -f [long]$dragPrevTarget, [long]$script:CurrentTarget)
+        $script:CurrentTarget = $dragPrevTarget
+      }
+    }
+    "selecttext" {
+      # Select a range of TEXT by clicking the start, then SHIFT+clicking the end. Far more
+      # reliable than a press-drag for text: a drag can slip onto the desktop (selecting
+      # nothing) or tear off a browser tab, whereas two clicks land inside the window and
+      # keep it foreground. Then the plan's ctrl+c copies the selection.
+      $x1 = [int]$a.x1; $y1 = [int]$a.y1; $x2 = [int]$a.x2; $y2 = [int]$a.y2
+      Move-To $x1 $y1; Left-Click          # place the caret + activate the window
+      Update-Target
+      Log ("selecttext start ({0},{1}): target now {2}" -f $x1, $y1, [long]$script:CurrentTarget)
+      if ([LazyWin]::IsShell($script:CurrentTarget)) {
+        Log ("FOCUS_ABORT: selecttext start landed on the desktop/shell (missed the app); re-planning")
+        $aborted = $true; break
+      }
+      Start-Sleep -Milliseconds 60
+      [LazyCtl]::keybd_event(0x10, 0, 0, [UIntPtr]::Zero)   # SHIFT down (VK_SHIFT)
+      Start-Sleep -Milliseconds 20
+      Move-To $x2 $y2; Left-Click          # SHIFT+click extends the selection to here
+      Start-Sleep -Milliseconds 20
+      [LazyCtl]::keybd_event(0x10, 0, 2, [UIntPtr]::Zero)   # SHIFT up (KEYEVENTF_KEYUP)
+      Update-Target
+      Log ("selecttext end ({0},{1}): target now {2}" -f $x2, $y2, [long]$script:CurrentTarget)
     }
     "press" {
       # VERIFY-FIRST: only inject when the intended window is provably foreground.
@@ -363,10 +501,26 @@ foreach ($a in $plan) {
       Paste-Text ([string]$a.text)  # clipboard-safe: restores prior content (e.g. a copied URL)
     }
     "launch" {
+      # Map common friendly names to a real launcher so Start-Process succeeds (and we
+      # skip the flaky Start-menu fallback). File Explorer is the key case: explorer.exe
+      # is always running as the shell, so "open File Explorer" must spawn a real folder
+      # window, not reuse the Desktop.
+      $appName = [string]$a.app
+      $an = ($appName -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+      $launchExe = $appName
+      if ($an -eq 'fileexplorer' -or $an -eq 'explorer' -or $an -eq 'windowsexplorer' -or $an -eq 'thispc' -or $an -eq 'myfiles' -or $an -eq 'files') { $launchExe = 'explorer.exe' }
+      elseif ($an -eq 'cmd' -or $an -eq 'commandprompt' -or $an -eq 'cmdexe') { $launchExe = 'cmd.exe' }
+      # Is the requested "app" actually a browser or a website URL? Only THEN do we skip a
+      # launch while already in a browser (so "launch youtube.com" navigates instead of
+      # spawning a duplicate). A REAL app name like "microsoft word" must still launch -
+      # the old check skipped EVERY non-exe launch from a browser, so Word/Notepad never
+      # opened and the loop spun re-copying (the "can't open Word, stuck" bug).
+      $isBrowserApp = $an -match '^(chrome|googlechrome|msedge|edge|microsoftedge|firefox|mozillafirefox|brave|opera|operagx|vivaldi|chromium)$'
+      $looksLikeUrl = $appName -match '(\.[a-zA-Z]{2,})|(^\s*https?://)|(^\s*www\.)'
       # Reuse an already-open VISIBLE window for this app — never spawn a duplicate
       # of a window that's already there (a 2nd Chrome collides on the profile lock
       # and strands the first, then it won't reopen without a Task-Manager kill).
-      $existing = Find-AppWindow ([string]$a.app)
+      $existing = Find-AppWindow $appName
       if ($existing -ne [IntPtr]::Zero) {
         Log ("launch '{0}': reusing existing window {1}" -f $a.app, [long]$existing)
         $script:CurrentTarget = $existing
@@ -378,19 +532,20 @@ foreach ($a in $plan) {
         # no duplicate/lock conflict — then we WAIT for that window to actually exist
         # before any keystroke targets it (the launch race the old code ignored).
         $opened = $false
-        try { Start-Process -FilePath ([string]$a.app) -ErrorAction Stop; $opened = $true } catch { $opened = $false }
+        try { Start-Process -FilePath $launchExe -ErrorAction Stop; $opened = $true } catch { $opened = $false }
         $launched = $opened
         if (-not $opened) {
-          if (Test-IsBrowser $script:CurrentTarget) {
-            # We're ALREADY in a browser and the "app" isn't a real executable — this is
-            # almost certainly a WEBSITE the model mislabeled as an app (e.g. launch
-            # "youtube"). Do NOT Start-menu-launch a new browser: that spawns a duplicate
-            # that can strand the user's Chrome (Task-Manager-kill territory). Skip it —
-            # the plan's following keyboard actions (ctrl+l + type the URL) navigate the
-            # browser we're already in.
+          if ((Test-IsBrowser $script:CurrentTarget) -and ($isBrowserApp -or $looksLikeUrl)) {
+            # We're ALREADY in a browser AND the "app" is itself a browser or a URL — this
+            # is a WEBSITE the model mislabeled as an app (e.g. launch "youtube.com"). Do
+            # NOT Start-menu-launch a new browser: that spawns a duplicate that can strand
+            # the user's Chrome (Task-Manager-kill territory). Skip it — the plan's
+            # following keyboard actions (ctrl+l + type the URL) navigate the browser we're
+            # already in. (A REAL app name like "microsoft word" falls through and launches.)
             Log ("launch '{0}': SKIPPED (already in browser; treat as website navigation, no new window)" -f $a.app)
           } else {
-            # Genuine app with no plain exe name (Microsoft Store / UWP) → Start-menu search.
+            # Genuine app with no plain exe name (Microsoft Store / UWP, or a real desktop
+            # app while a browser is foreground) → Start-menu search.
             Log ("launch '{0}': Start-menu fallback" -f $a.app)
             [LazyCtl]::keybd_event(0x5B, 0, 0, [UIntPtr]::Zero)  # LWIN down
             [LazyCtl]::keybd_event(0x5B, 0, 2, [UIntPtr]::Zero)  # LWIN up
@@ -409,7 +564,9 @@ foreach ($a in $plan) {
           if ($win -ne [IntPtr]::Zero) {
             $script:CurrentTarget = $win
             [void](Focus-Window $script:CurrentTarget)
-            Start-Sleep -Milliseconds 250
+            # Cold-started app: the window exists but may not accept input yet (Word's start
+            # screen). Wait for stable foreground so a later paste/keystroke isn't lost.
+            Wait-WindowReady $script:CurrentTarget
           }
         }
       }
@@ -423,6 +580,7 @@ foreach ($a in $plan) {
       if ($a.verb -eq "click") {
         Move-To ([int]$a.x) ([int]$a.y); Left-Click
         Update-Target
+        Log ("uia click ({0},{1}): target now {2}" -f [int]$a.x, [int]$a.y, [long]$script:CurrentTarget)
       } else {
         $el = Find-Element $a.id $a.name
         if ($a.verb -eq "invoke") {
@@ -435,6 +593,7 @@ foreach ($a in $plan) {
           }
           if (-not $invoked) { Move-To ([int]$a.x) ([int]$a.y); Left-Click }  # fallback
           Update-Target
+          Log ("uia invoke name='{0}' ({1},{2}) invoked={3}: target now {4}" -f $a.name, [int]$a.x, [int]$a.y, $invoked, [long]$script:CurrentTarget)
         } elseif ($a.verb -eq "settext") {
           # Focus the field by clicking its real rect center (reliable activation),
           # adopt that window, then VERIFY before pasting (so we never type into the
@@ -456,7 +615,7 @@ if ($aborted) {
   # Couldn't guarantee the right window had focus — fail LOUD instead of typing into
   # the wrong app. main.js surfaces this and the loop can re-plan from a fresh shot.
   Log "ABORTED: could not focus target before a keystroke action"
-  [Console]::Error.WriteLine("Couldn't focus the target window - aborted before typing to avoid sending text to the wrong app.")
+  [Console]::Error.WriteLine("FOCUS_ABORT: Couldn't focus the target window - aborted before typing to avoid sending text to the wrong app.")
   exit 1
 }
 Log "=== run complete"

@@ -83,6 +83,18 @@ if ($isBrowser) {
   exit 0
 }
 
+# UWP / Microsoft Store apps (Clock, Alarms, Photos, Settings, ...) are hosted by
+# ApplicationFrameHost. Their a11y tree, queried via the frame window, reports unreliable
+# element rects and InvokePattern.Invoke() frequently fails — and the rect-based fallback
+# click then misses the (usually non-maximized) window and lands on the Desktop behind it,
+# which backgrounds the app (the Clock "click + and it exits" bug). Return no elements so
+# the model uses accurate vision pixel-clicks read straight off the screenshot; those stay
+# inside the window. Keyboard paths (launch/type/press) are unaffected.
+if ($pname -eq 'applicationframehost') {
+  Write-Output ('{"hwnd":' + [long]$h + ',"browser":false,"elements":[]}')
+  exit 0
+}
+
 # Chromium/Edge/WebView DESKTOP apps keep their accessibility tree OFF until a UIA
 # client asks for it. Do a throwaway query to trigger it, wait, then proceed, so the
 # app's controls (contact rows, message box, buttons) show up instead of nothing.

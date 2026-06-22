@@ -14,43 +14,45 @@ function check(name, actual, expected) {
   if (!ok) failures++;
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${ok ? "" : `\n   expected ${JSON.stringify(expected)}\n   got      ${JSON.stringify(actual)}`}`);
 }
-const shape = (p) => ({ done: p.done, n: p.actions.length, failed: /couldn.t work out|cut off/i.test(p.say) });
+const shape = (p) => ({ done: p.done, n: p.actions.length, parsed: p.parsed });
 
 // 1. Clean, complete JSON.
 check("valid plan", shape(parsePlan(`{"done":true,"say":"ok","actions":[{"type":"ui_type","ref":2,"text":"KMKL"}]}`)),
-  { done: true, n: 1, failed: false });
+  { done: true, n: 1, parsed: true });
 
 // 2. Truncated mid-string (last action's text cut) → drop the suspect last action.
 check("truncated mid-string drops last", shape(parsePlan(`{"done":false,"say":"Typing","actions":[{"type":"ui_type","ref":42,"text":"KMK`)),
-  { done: false, n: 0, failed: false });
+  { done: false, n: 0, parsed: true });
 
 // 3. A complete action, then the next action's string is cut → keep the complete one.
 check("keeps complete action before cut", shape(parsePlan(`{"done":false,"actions":[{"type":"press","keys":"ctrl+e"},{"type":"text","text":"Bhone`)),
-  { done: false, n: 1, failed: false });
+  { done: false, n: 1, parsed: true });
 
 // 4. Cut right after a complete action's closing brace (brackets only) → keep it.
 check("keeps action when only brackets closed", shape(parsePlan(`{"done":false,"actions":[{"type":"press","keys":"enter"}`)),
-  { done: false, n: 1, failed: false });
+  { done: false, n: 1, parsed: true });
 
 // 5. Two complete actions, cut after a number (no open string) → keep both.
 check("keeps both when cut after number", shape(parsePlan(`{"done":false,"actions":[{"type":"launch","app":"teams"},{"type":"wait","ms":2000`)),
-  { done: false, n: 2, failed: false });
+  { done: false, n: 2, parsed: true });
 
 // 6. Prose preamble before the JSON → ignored.
 check("ignores prose preamble", shape(parsePlan(`Sure, here is the plan: {"done":true,"say":"x","actions":[{"type":"press","keys":"enter"}]}`)),
-  { done: true, n: 1, failed: false });
+  { done: true, n: 1, parsed: true });
 
 // 7. Code-fenced JSON → unwrapped.
 check("unwraps code fences", shape(parsePlan("```json\n{\"done\":true,\"say\":\"x\",\"actions\":[]}\n```")),
-  { done: true, n: 0, failed: false });
+  { done: true, n: 0, parsed: true });
 
-// 8. Empty reply (whole budget went to a thinking block) → safe fallback.
-check("empty reply → fallback", shape(parsePlan("")),
-  { done: true, n: 0, failed: true });
+// 8. Empty reply (whole budget went to a thinking block) → NOT done and NOT parsed, so the
+//    loop keeps the overlay up and re-plans instead of hiding it as if the task completed
+//    (the "opened the app, then nothing happened, bar disappeared" bug).
+check("empty reply → not-done re-plan", shape(parsePlan("")),
+  { done: false, n: 0, parsed: false });
 
-// 9. Non-JSON garbage → safe fallback.
-check("garbage → fallback", shape(parsePlan("I cannot help with that.")),
-  { done: true, n: 0, failed: true });
+// 9. Non-JSON garbage → same contract: not done, not parsed (never treat as completion).
+check("garbage → not-done re-plan", shape(parsePlan("I cannot help with that.")),
+  { done: false, n: 0, parsed: false });
 
 // 10. Malformed actions inside an otherwise-valid plan are dropped, not fatal.
 check("drops malformed actions", parsePlan(`{"done":true,"actions":[{"type":"ui_type","ref":3,"text":"hi"},{"type":"bogus"},{"type":"press"}]}`).actions.length,

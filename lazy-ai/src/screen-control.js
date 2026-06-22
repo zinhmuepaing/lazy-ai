@@ -33,7 +33,8 @@ each <action> is one of:
 - {"type":"scroll","x":640,"y":430,"amount":-600}   LAST RESORT. scroll at a pixel point; amount NEGATIVE = down, POSITIVE = up.
 - {"type":"click","x":512,"y":360}          LAST RESORT. left-click a pixel point — only when there is NO keyboard way and the target is VISIBLE now.
 - {"type":"doubleclick","x":..,"y":..} / {"type":"rightclick","x":..,"y":..}   LAST RESORT.
-- {"type":"drag","x1":300,"y1":250,"x2":620,"y2":520}   press the left button at (x1,y1), DRAG across to (x2,y2), release. This is the ONLY way to DRAW a shape/stroke, move a slider/handle, or drag-and-drop. Coords are screenshot pixels (same frame as click).
+- {"type":"drag","x1":300,"y1":250,"x2":620,"y2":520}   press the left button at (x1,y1), DRAG across to (x2,y2), release. Use "drag" ONLY for DRAWING a shape/stroke, moving a slider/handle, or drag-and-drop. Coords are screenshot pixels (same frame as click). Do NOT use "drag" to select text — use "selecttext" below (a press-drag tends to slip off onto the desktop and select nothing).
+- {"type":"selecttext","x1":276,"y1":517,"x2":462,"y2":591}   SELECT a range of text: clicks the start then SHIFT+clicks the end, highlighting everything between. THIS is how you highlight text to copy (then {"type":"press","keys":"ctrl+c"}). x1,y1 = the FIRST character of the range; x2,y2 = just past the LAST character. Reliable and keeps the window focused — always prefer it over "drag" for selecting text. Coords are screenshot pixels.
 
 DRAWING / SLIDERS / DRAG-AND-DROP have NO keyboard way — use "drag". IMPORTANT: selecting a drawing tool does NOT draw anything. To draw a shape (a circle, rectangle, line, brush stroke) you must FIRST select the tool (ui_invoke / click its button), THEN issue a "drag" across the canvas from a start point to an end point — e.g. to draw a circle, drag from its top-left to its bottom-right. One drag = one stroke. Do not loop selecting the tool; after the tool is selected, the next action must be the drag.
 
@@ -45,6 +46,8 @@ NEVER use click/scroll for any of these — there is always a keyboard way:
 - focusing a search or address bar → press its shortcut (browsers/Spotify "ctrl+l", many apps "ctrl+f" or "ctrl+k", then "text").
 - typing or submitting → "text" then "press enter".
 - opening menus / dismissing popups → "press" (e.g. "escape", "ctrl+f"). Do NOT close the user's existing windows, tabs, or apps (alt+f4, ctrl+w, quitting) unless the goal EXPLICITLY asks to close something — closing the app you're working in strands the user's session.
+- FILE EXPLORER navigation → to GO TO a folder, focus the ADDRESS BAR with "alt+d" (or "ctrl+l"), then "text" the folder name or path (e.g. "Documents"), then "press enter". NEVER type a path/location into the Search box (the search shortcut ctrl+f/ctrl+e) — that just searches for the text and fails. To CREATE a folder: "press ctrl+shift+n", then "text" its name, then "press enter".
+- NEVER use Windows-key combos (win+e, win+r, win+d, or win+anything) — the Windows key is not supported and they do NOTHING (a "win+r" would just type a stray "r"). Open any app with "launch" instead.
 
 COPY / PASTE — MOVING DATA BETWEEN APPS (critical, read carefully):
 the system CLIPBOARD holds the ONE thing you copied — the PAYLOAD (a URL, a selection, a value). you can NOT see it; you move it by COPY then PASTE:
@@ -60,6 +63,11 @@ worked example "copy this video's URL and send it to Bhone Min Thant on Teams":
   turn 2 (open Teams, then TYPE his name into search — do NOT paste here): launch microsoft teams / wait / press ctrl+e / text "Bhone Min Thant" / wait → LOOK
   turn 3 (open his chat): {"type":"ui_invoke","ref":N} on his contact row → LOOK (wait for the message box to appear)
   turn 4 (now at the destination, PASTE the URL): {"done":true,"actions":[{"type":"ui_click","ref":M},{"type":"press","keys":"ctrl+v"},{"type":"press","keys":"enter"}]}
+worked example "copy the first lines of this page into a NEW Word document" (paste into a fresh doc — NOT a search):
+  turn 1 (select + copy in the browser): {"done":false,"say":"Copying the text","actions":[{"type":"selecttext","x1":..,"y1":..,"x2":..,"y2":..},{"type":"press","keys":"ctrl+c"}]} → LOOK
+  turn 2 (open a blank document — Word/Office COLD-START on a "Start / template" picker, NOT a blank page): {"done":false,"say":"Opening a blank Word document","actions":[{"type":"launch","app":"microsoft word"},{"type":"wait","ms":1500},{"type":"press","keys":"enter"},{"type":"wait","ms":1200}]} → LOOK: is a BLANK PAGE actually open with the cursor in it? (pressing Enter chooses the highlighted "Blank document")
+  turn 3 (paste — ONLY once a blank page is showing): {"done":true,"say":"Pasting the text","actions":[{"type":"press","keys":"ctrl+v"}]}
+  CRITICAL for documents (Word/Excel/PowerPoint/Notepad): (1) Office apps open on a TEMPLATE/Start screen first — you MUST reach a blank document before pasting: "press enter" (selects "Blank document") or click "Blank document", then LOOK to confirm the blank page is visible; if you still see the template picker, press enter again and do NOT ctrl+v yet. (2) They are NOT browsers — NEVER press "ctrl+l" (it just left-aligns). (3) A blank document already has the cursor in the body, so just "press ctrl+v" — do NOT click around, retype the text, or go back to re-copy; the payload is already on the clipboard from ctrl+c.
 
 WHEN TO BATCH vs WHEN TO STOP AND LOOK:
 - BATCH everything and set "done":true ONLY when the whole task is deterministic and needs NO intermediate result — e.g. open an app and type into its main editing area (Notepad, Word, OneNote, a new doc). that is the fast path.
@@ -112,7 +120,7 @@ OUTPUT BUDGET (important): your entire reply must be ONE small JSON object and n
 
 const VALID_TYPES = new Set([
   "ui_invoke", "ui_click", "ui_type", // Stage 5.4 — act on real UI elements by ref
-  "launch", "press", "text", "wait", "scroll", "click", "doubleclick", "rightclick", "drag",
+  "launch", "press", "text", "wait", "scroll", "click", "doubleclick", "rightclick", "drag", "selecttext",
 ]);
 
 // Phase 1 — UIA pruning (space-complexity fix). A raw UIA dump of an app like
@@ -235,6 +243,9 @@ function sanitizeActions(raw) {
       case "drag":
         out.push({ type: "drag", x1: toPx(a.x1), y1: toPx(a.y1), x2: toPx(a.x2), y2: toPx(a.y2) });
         break;
+      case "selecttext":
+        out.push({ type: "selecttext", x1: toPx(a.x1), y1: toPx(a.y1), x2: toPx(a.x2), y2: toPx(a.y2) });
+        break;
       case "ui_invoke":
       case "ui_click":
         if (Number.isInteger(a.ref)) out.push({ type: a.type, ref: a.ref });
@@ -267,7 +278,11 @@ function parsePlan(text) {
   }
 
   if (!data || typeof data !== "object") {
-    return { done: true, say: "I couldn't work out a safe plan for that.", actions: [] };
+    // Couldn't parse a plan at all (e.g. the whole budget went to a thinking block, or
+    // the reply was cut off mid-JSON and unsalvageable). done:false + parsed:false so
+    // main.js keeps the overlay up and re-plans, instead of treating this as completion
+    // and hiding the bar ("opened the app, then nothing happened, bar disappeared").
+    return { done: false, parsed: false, explicitDone: false, say: "I couldn't read a clear next step — trying again.", actions: [] };
   }
 
   // If a string value was truncated, the LAST action straddled the cut and may be
@@ -277,6 +292,8 @@ function parsePlan(text) {
 
   return {
     done: data.done !== false, // default true so we never loop on a malformed reply
+    parsed: true,
+    explicitDone: data.done === true, // only an EXPLICIT done hides the overlay (main.js empty-actions branch)
     say: typeof data.say === "string" ? data.say : "",
     actions: sanitizeActions(data.actions),
   };

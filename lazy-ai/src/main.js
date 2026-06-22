@@ -85,6 +85,7 @@ let controlActive = false; // a multi-step Screen Control command is running
 let controlGoal = ""; // the user's command/goal for the control loop
 let controlHistory = []; // Anthropic messages (text-only) across control turns
 let controlTurnCount = 0;
+let controlRetries = 0; // consecutive soft failures (focus abort / unparseable plan) this loop; bounded re-plan
 let controlElements = []; // this turn's UIA element list (idx,name,type,rect,…)
 let controlTargetHwnd = 0; // the target app window (for UIA re-find at execution)
 let controlWokeHwnd = 0; // last target whose UIA a11y tree we already woke this session (skip the 700ms re-wake)
@@ -936,6 +937,7 @@ async function startControlGoal(command) {
   controlGoal = (command || "").trim();
   controlHistory = [];
   controlTurnCount = 0;
+  controlRetries = 0;
   controlWokeHwnd = 0; // fresh session: nothing woken / detected yet
   controlBrowserHwnd = 0;
   controlTargetHwnd = controlSourceHwnd; // start from the app the user summoned over
@@ -1017,7 +1019,11 @@ function resolvePlan(actions, elements, goal, imageWidth, imageHeight) {
   const resolved = [];
   for (const a of actions) {
     if (a.type === "launch") resolved.push({ type: "launch", app: a.app });
-    else if (a.type === "press") resolved.push({ type: "press", send: winAutomation.composeSendKeys(a.keys) });
+    else if (a.type === "press") {
+      const send = winAutomation.composeSendKeys(a.keys);
+      if (send) resolved.push({ type: "press", send });
+      else console.warn(`[lazy-ai] control: dropped unsupported key combo "${a.keys}" (Windows-key combos aren't addressable — open apps with "launch")`);
+    }
     else if (a.type === "text") {
       // Guard 3 (field-unknown variant) — anti-regurgitation. On a "copy X and send it"
       // task the model can't see the copied payload, so it sometimes TYPES the command
@@ -1037,11 +1043,11 @@ function resolvePlan(actions, elements, goal, imageWidth, imageHeight) {
     } else if (a.type === "click" || a.type === "doubleclick" || a.type === "rightclick") {
       const p = fractionToPhysical(a.x / W, a.y / H);
       resolved.push({ type: a.type, x: p.x, y: p.y });
-    } else if (a.type === "drag") {
+    } else if (a.type === "drag" || a.type === "selecttext") {
       // Both endpoints are screenshot pixels → physical px (DPI/multi-monitor accurate).
       const p1 = fractionToPhysical(a.x1 / W, a.y1 / H);
       const p2 = fractionToPhysical(a.x2 / W, a.y2 / H);
-      resolved.push({ type: "drag", x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y });
+      resolved.push({ type: a.type, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y });
     } else if (a.type === "ui_invoke" || a.type === "ui_click" || a.type === "ui_type") {
       const el = byRef(a.ref);
       if (!el) continue; // stale ref → drop
@@ -1089,10 +1095,11 @@ function resolvePlan(actions, elements, goal, imageWidth, imageHeight) {
 // Budget a timeout that covers the plan's own waits plus per-action overhead.
 function planTimeoutMs(actions) {
   const waits = actions.reduce((sum, a) => sum + (a.type === "wait" ? a.ms : 0), 0);
-  // Each "launch" may poll up to ~9s for the app's window to appear (Wait-ForAppWindow),
-  // so budget for that on top of the plan's own waits — else execFile kills mid-launch.
+  // Each "launch" may poll up to ~9s for the window to appear (Wait-ForAppWindow) PLUS up
+  // to ~12s for a cold/heavy app (Word) to become responsive (Wait-WindowReady), so budget
+  // ~22s per launch on top of the plan's own waits — else execFile kills the batch mid-launch.
   const launches = actions.filter((a) => a.type === "launch").length;
-  return Math.min(60000, 8000 + waits + launches * 10000 + actions.length * 500);
+  return Math.min(75000, 8000 + waits + launches * 22000 + actions.length * 500);
 }
 
 async function controlTurn({ useExistingShot }) {
@@ -1184,8 +1191,20 @@ async function controlTurn({ useExistingShot }) {
       imageWidth: shot.width,
       imageHeight: shot.height,
     });
-    if (plan.done) finishControl();
-    else stopControl(); // couldn't proceed — leave the overlay up for another command
+    // Only auto-finish (which HIDES the overlay) when the model EXPLICITLY said done in
+    // a reply we actually parsed. A parse/truncation failure (parsed:false) used to
+    // default done:true here and silently hide the overlay — the "opened the app, then
+    // nothing happened and the bar disappeared" symptom. Instead re-plan a couple of
+    // times on an unparseable reply, then leave the overlay up rather than vanishing.
+    if (plan.parsed && plan.explicitDone) {
+      finishControl();
+    } else if (!plan.parsed && controlActive && controlRetries < 2) {
+      controlRetries += 1;
+      sendOverlayStatus("Re-reading the screen…", "loading");
+      setTimeout(() => { if (controlActive) controlTurn({ useExistingShot: false }); }, 500);
+    } else {
+      stopControl(); // genuine "can't proceed", or retries exhausted — leave overlay up
+    }
     return;
   }
 
@@ -1197,10 +1216,10 @@ async function controlTurn({ useExistingShot }) {
     if (SPATIAL_TYPES.includes(a.type)) {
       // a.x/a.y are already pixels in the screenshot frame = overlay-canvas space.
       draw.push({ shape: "circle", x: Math.round(a.x), y: Math.round(a.y), r, label: a.type });
-    } else if (a.type === "drag") {
+    } else if (a.type === "drag" || a.type === "selecttext") {
       // Endpoints are screenshot pixels = canvas space; show the stroke + its end.
       draw.push({ shape: "line", from: [Math.round(a.x1), Math.round(a.y1)], to: [Math.round(a.x2), Math.round(a.y2)] });
-      draw.push({ shape: "circle", x: Math.round(a.x2), y: Math.round(a.y2), r, label: "drag" });
+      draw.push({ shape: "circle", x: Math.round(a.x2), y: Math.round(a.y2), r, label: a.type === "selecttext" ? "select" : "drag" });
     } else if (a.type === "ui_invoke" || a.type === "ui_click" || a.type === "ui_type") {
       const el = controlElements.find((e) => e.idx === a.ref);
       if (el) {
@@ -1219,27 +1238,67 @@ async function controlTurn({ useExistingShot }) {
 
   const resolved = resolvePlan(plan.actions, controlElements, controlGoal, shot.width, shot.height);
   const targetHwnd = controlTargetHwnd;
+  // SYSTEMIC FOCUS FIX. Does this batch move the mouse (click / drag / scroll / select /
+  // UIA click)? If so, the overlay MUST be off-screen while the batch runs. The overlay is
+  // a full-screen, always-on-top, click-through window; a synthetic click "through" it does
+  // NOT cleanly re-activate the window beneath — Windows lets activation fall through to the
+  // DESKTOP, so the target app drops to the background the instant any mouse action fires.
+  // That is the cross-app "every app exits on click/drag" bug (Chrome, UWP Clock, Win32
+  // Paint all failed identically; in the log, top-of-batch focusOk=True, then the click →
+  // `target now 132122` = the desktop). Keyboard batches are immune (SendKeys posts to the
+  // focused window — that's why launch/type/press tasks always passed), so we only pay the
+  // hide/restore cost on mouse batches: fully HIDE the overlay (not just blur) for the
+  // duration, then bring it back with showInactive() so it never steals the app's focus.
+  const hasPointer = resolved.some((a) =>
+    ["click", "doubleclick", "rightclick", "scroll", "drag", "selecttext", "uia"].includes(a.type)
+  );
   controlTimer = setTimeout(async () => {
     controlTimer = null;
     if (!controlActive) return;
-    // Relinquish the overlay's foreground BEFORE the batch types. The overlay is an
-    // always-on-top window that just held keyboard focus (the user typed the command
-    // into its bar); if it keeps the foreground, the batch's first keystroke can land
-    // in the overlay instead of the target app — the "URL gets appended into our input
-    // bar" bug seen when summoning ON the target (Chrome) where the plan has no leading
-    // launch/wait to let focus settle. Blurring hands the foreground back to the app
-    // underneath; control-batch then force-focuses + verifies the real target anyway.
-    try { overlayWindow.blur(); } catch {}
+    if (hasPointer) {
+      try { overlayWindow.hide(); } catch {} // remove the topmost click-through window so clicks activate the target
+    } else {
+      // Keyboard-only batch: blurring hands the foreground to the app beneath; control-batch
+      // then force-focuses + verifies the real target before each keystroke anyway.
+      try { overlayWindow.blur(); } catch {}
+    }
     await delay(120);
     if (!controlActive) return;
+    let failed = null;
     try {
       await winAutomation.performPlan(resolved, planTimeoutMs(plan.actions), targetHwnd, overlayHwnd());
     } catch (err) {
-      sendOverlayStatus(`Action failed: ${String(err.message || err)}`, "err");
+      failed = err;
+    }
+    // Bring the overlay back WITHOUT activating it (showInactive keeps the target app
+    // foreground), restoring its always-on-top + click-through — needed before any re-plan
+    // preview, error message, or finish.
+    if (hasPointer && controlActive && overlayWindow) {
+      try {
+        overlayWindow.showInactive();
+        overlayWindow.setAlwaysOnTop(true, "screen-saver");
+        overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+      } catch {}
+    }
+    if (!controlActive) return;
+    if (failed) {
+      const msg = String(failed.message || failed);
+      // A focus/aim abort (couldn't prove the intended window was foreground, or a pointer
+      // action landed on the desktop) is RECOVERABLE — re-capture and re-plan instead of
+      // killing the session. Bounded so a truly unreachable target can't loop forever.
+      if (msg.includes("FOCUS_ABORT") && controlRetries < 2) {
+        controlRetries += 1;
+        sendOverlayStatus("Re-aiming…", "loading");
+        await delay(450);
+        if (!controlActive) return;
+        controlTurn({ useExistingShot: false });
+        return;
+      }
+      sendOverlayStatus(`Action failed: ${msg}`, "err");
       stopControl();
       return;
     }
-    if (!controlActive) return;
+    controlRetries = 0; // a batch ran cleanly — clear the soft-failure budget
     if (plan.done) {
       finishControl(); // the batch completed the goal
       return;

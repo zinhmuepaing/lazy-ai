@@ -78,13 +78,17 @@ const SENDKEYS_NAMED = {
 function composeSendKeys(combo) {
   const parts = String(combo || "").toLowerCase().split("+").map((s) => s.trim()).filter(Boolean);
   if (!parts.length) return "";
+  // The Windows key isn't addressable via SendKeys. A combo like "win+e"/"win+r" must
+  // NOT be reduced to a bare "e"/"r" — that injects a stray letter into the focused app
+  // (it typed "r" into File Explorer and derailed the task into Windows Search). Drop the
+  // whole action; the caller skips an empty send, and the model opens apps via "launch".
+  if (parts.includes("win") || parts.includes("meta") || parts.includes("super")) return "";
   const key = parts.pop();
   let mods = "";
   for (const m of parts) {
     if (m === "ctrl" || m === "control") mods += "^";
     else if (m === "alt") mods += "%";
     else if (m === "shift") mods += "+";
-    // "win"/"meta" intentionally ignored — not addressable via SendKeys
   }
   let k;
   if (SENDKEYS_NAMED[key]) k = SENDKEYS_NAMED[key];
