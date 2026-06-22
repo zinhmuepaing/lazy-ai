@@ -204,24 +204,236 @@ function drawInstruction(ins, a) {
   }
 }
 
-// ---- Text-to-speech (free, local Windows voice via speechSynthesis) -------
+// ---- Text-to-speech (premium Edge-TTS "Ava", local speechSynthesis fallback) --
 // Always on (no mute button — the bar stays slim). The audio-wave animation
 // shows while a sentence is being spoken.
-function speakStep(text, onend) {
-  if (!text || !window.speechSynthesis) return false;
-  window.speechSynthesis.cancel(); // never overlap with the previous sentence
+//
+// Primary voice is Edge-TTS, synthesized in main (tts-engine.js) and STREAMED
+// from the local server; an <audio> element plays chunks as they arrive, so it
+// starts at first-chunk latency (not full-synthesis time). It's a free CLOUD
+// call, so if it fails (offline / hiccup) we fall back to the local Windows voice.
+//
+// Look-ahead prefetch: while step N plays, step N+1's audio is downloaded into a
+// complete Blob (walk.nextPrefetch), so the swap on 'ended' is instant AND starts
+// cleanly from 0 (no clipped first syllable). speakStep(text, audio, onend) drives
+// `onend` (which advances the walkthrough) off the audio actually ENDING — never a
+// text-length estimate — so a sentence is never cut off. A
+// monotonic token cancels stale events when a newer step starts or we stop.
+const TTS_RATE = 1.05; // matches the old speechSynthesis pace
+// Edge-TTS audio is STREAMED (progressive playback), so this gates only the time
+// to the FIRST audio chunk — not full synthesis. Streaming plays the instant the
+// first chunk lands, so a higher value adds NO delay on the happy path; it's only
+// the "give up and use the local voice" threshold for an unreachable/dead stream.
+// Independent of sentence length. 7s gives a slow/cold first request (handshake +
+// Edge time-to-first-audio) room to land in Ava rather than prematurely falling
+// back to the robotic voice. Streaming plays the instant the first chunk lands, so
+// this higher value adds NO delay on the happy path.
+const STREAM_START_TIMEOUT_MS = 7000;
+// The local engine streams TTS here (mirrors local-server.js PORT 8788). An
+// <audio> element pointed at this URL plays the MP3 as bytes arrive.
+const TTS_STREAM_BASE = "http://localhost:8788/tts";
+let currentAudio = null; // the <audio> element currently streaming Edge-TTS, if any
+let speakToken = 0; // bumps on every speakStep()/stopSpeaking() so stale results no-op
+
+// Diagnostics: log to the overlay's own console AND forward to the main process
+// (terminal) so the whole TTS decision path is visible in one place while debugging.
+function tlog(...a) {
+  console.log("[overlay-tts]", ...a);
+  try {
+    if (window.lazyAI.ttsLog) {
+      window.lazyAI.ttsLog(a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "));
+    }
+  } catch {}
+}
+
+function stopAudio() {
+  if (currentAudio) {
+    // Hard kill: mark as intentionally stopped (so the pending play() rejection is
+    // swallowed, not surfaced as an error), then pause + abort the in-flight stream
+    // (removeAttribute + load() closes the HTTP connection).
+    currentAudio._killed = true;
+    try { currentAudio.pause(); currentAudio.removeAttribute("src"); currentAudio.load(); } catch {}
+    releaseAudio(currentAudio);
+    currentAudio = null;
+  }
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+}
+
+// Free local Windows voice — the offline fallback. `done` is the single-fire
+// settle() so the walkthrough advances exactly once.
+function speakWithSpeechSynthesis(text, token, done) {
+  tlog("speaking via local speechSynthesis (robotic fallback)");
+  if (!window.speechSynthesis) { tlog("speechSynthesis unavailable — advancing silently"); done(); return; }
+  window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
-  utterance.rate = 1.05;
-  utterance.onstart = () => setSpeaking(true);
-  utterance.onend = () => { setSpeaking(false); onend(); };
-  utterance.onerror = () => { setSpeaking(false); onend(); }; // don't stall on a hiccup
+  utterance.rate = TTS_RATE;
+  utterance.onstart = () => { if (token === speakToken) setSpeaking(true); };
+  utterance.onend = () => { if (token === speakToken) { setSpeaking(false); done(); } };
+  utterance.onerror = () => { if (token === speakToken) { setSpeaking(false); done(); } };
   window.speechSynthesis.speak(utterance);
-  return true;
+}
+
+function ttsUrl(text) {
+  return `${TTS_STREAM_BASE}?rate=${encodeURIComponent(TTS_RATE)}&text=${encodeURIComponent(text)}`;
+}
+
+// Create a streaming <audio> for `text` for IMMEDIATE play (the first step, or when
+// a prefetch isn't ready). Played right away with no pre-buffer, so it starts
+// cleanly at 0. (Prefetched steps play a COMPLETE Blob instead — see startPrefetch.)
+function makeTtsAudio(text) {
+  if (!text) return null;
+  const audio = new Audio();
+  audio.preload = "auto";
+  audio.src = ttsUrl(text);
+  return audio;
+}
+
+// Prefetch the NEXT step by fully downloading its audio into an in-memory Blob.
+// Playing from a COMPLETE Blob starts cleanly at 0 — a pre-buffered *streaming*
+// element resumes at its live edge and clips the first syllable — and makes the
+// swap instant. `.url` becomes a blob: URL when ready; `.failed` on a download error.
+function startPrefetch(text) {
+  if (!text) return null;
+  const holder = { url: null, failed: false, controller: new AbortController() };
+  holder.promise = fetch(ttsUrl(text), { signal: holder.controller.signal })
+    .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.blob(); })
+    .then((blob) => { holder.url = URL.createObjectURL(blob); })
+    .catch((err) => {
+      holder.failed = true;
+      if (!err || err.name !== "AbortError") tlog("prefetch failed:", String((err && err.message) || err));
+    });
+  return holder;
+}
+
+function discardPrefetch(holder) {
+  if (!holder) return;
+  try { holder.controller.abort(); } catch {}
+  if (holder.url) { try { URL.revokeObjectURL(holder.url); } catch {} holder.url = null; }
+}
+
+// Revoke the blob: URL backing a played audio element (prefetched steps), if any.
+function releaseAudio(audio) {
+  if (audio && audio._blobUrl) { try { URL.revokeObjectURL(audio._blobUrl); } catch {} audio._blobUrl = null; }
+}
+
+// If playback makes NO progress for this long (a real stall, or a dropped 'ended'),
+// advance anyway so the walkthrough never hangs. It's re-armed on every progress
+// tick, so it can never cut off audio that's still actually playing.
+const STUCK_MS = 8000;
+
+// Speak `text` for the current step using the (possibly prefetched + already
+// buffered) `audio` element. Advancement is driven by the audio actually ENDING,
+// so streamed Ava audio is never cut off mid-sentence. Falls back to the local
+// Windows voice if the stream can't start/play. Always calls onend exactly once.
+function speakStep(text, audio, onend, onStarted) {
+  const token = ++speakToken;
+  stopAudio(); // stop the previous step's audio + any utterance
+  // Fire onStarted() exactly once, when this step has CLAIMED a voice/socket (Ava
+  // 'playing', or a fallback). playStep uses it to DEFER the next step's prefetch
+  // so the prefetch can't race ahead and starve this step's stream (the first-step
+  // timeout-to-robotic bug).
+  let startedNotified = false;
+  const notifyStarted = () => { if (startedNotified) return; startedNotified = true; if (onStarted) onStarted(); };
+  if (!text) { notifyStarted(); onend(); return; }
+
+  let decided = false; // the first path to actually produce speech wins
+  let started = false; // Ava audio has begun playing
+  let settled = false;
+  const settle = () => { if (settled) return; settled = true; onend(); };
+
+  const useLocalVoice = (why) => {
+    if (decided || token !== speakToken) return;
+    decided = true;
+    notifyStarted(); // settled on the local voice → free the socket for the prefetch
+    tlog("falling back —", why);
+    speakWithSpeechSynthesis(text, token, settle);
+  };
+
+  // A prefetch that already errored (or a missing element) → straight to fallback.
+  if (!audio || audio.error) { useLocalVoice(audio ? "prefetch errored" : "no audio element"); return; }
+  currentAudio = audio;
+  // Detach this element and revoke its blob: URL (if prefetched) when it's done.
+  const endAudio = () => { if (currentAudio === audio) currentAudio = null; releaseAudio(audio); };
+
+  // (a) startTimer: nothing started playing → fall back. (b) stuckTimer: playback
+  // stalled / 'ended' dropped → advance. Re-armed on each timeupdate so it never
+  // pre-empts audio that's still progressing.
+  let startTimer = setTimeout(() => {
+    if (token !== speakToken) return;
+    audio._killed = true; // intentional give-up → swallow the play() rejection
+    try { audio.pause(); } catch {}
+    useLocalVoice(`no audio within ${STREAM_START_TIMEOUT_MS}ms`);
+  }, STREAM_START_TIMEOUT_MS);
+  let stuckTimer = null;
+  const armStuck = () => {
+    clearTimeout(stuckTimer);
+    stuckTimer = setTimeout(() => {
+      if (token !== speakToken) return;
+      tlog("playback stalled / no end event — advancing");
+      endAudio();
+      setSpeaking(false);
+      settle();
+    }, STUCK_MS);
+  };
+  const clearTimers = () => { clearTimeout(startTimer); clearTimeout(stuckTimer); };
+
+  // 'playing' fires when audio actually begins — our "Ava started" signal.
+  audio.addEventListener("playing", () => {
+    if (token !== speakToken || started) return;
+    if (decided) { try { audio.pause(); } catch {} return; } // already fell back — drop late stream
+    started = true;
+    decided = true;
+    notifyStarted(); // Ava is now streaming → safe to prefetch the next step
+    clearTimeout(startTimer);
+    armStuck();
+    tlog("Ava audio PLAYING ✓");
+    setSpeaking(true);
+  });
+
+  // Progress observed → push the stall backstop out. While the audio keeps
+  // playing this keeps re-arming, so the step only advances when it truly ends.
+  audio.addEventListener("timeupdate", () => {
+    if (token === speakToken && started) armStuck();
+  });
+
+  audio.addEventListener("ended", () => {
+    if (token !== speakToken) return;
+    clearTimers();
+    tlog("Ava audio ended");
+    setSpeaking(false);
+    endAudio();
+    settle();
+  });
+
+  audio.addEventListener("error", () => {
+    if (audio._killed || token !== speakToken) return; // intentional stop → silent
+    clearTimers();
+    const er = audio.error;
+    tlog("Ava audio ERROR:", er ? `code=${er.code} ${er.message || ""}` : "(unknown)");
+    endAudio();
+    setSpeaking(false);
+    // Nothing played yet → robotic voice. A mid-stream drop after we started →
+    // just finish the step (don't restart the sentence robotically).
+    if (!started) useLocalVoice("stream error before playback"); else settle();
+  });
+
+  tlog(`speakStep token=${token}: "${text.slice(0, 48)}${text.length > 48 ? "…" : ""}"`);
+  audio.play().then(
+    () => tlog("audio.play() accepted"),
+    (err) => {
+      if (audio._killed || token !== speakToken || started) return; // intentional stop → silent
+      clearTimeout(startTimer);
+      tlog("audio.play() REJECTED:", String((err && err.message) || err));
+      endAudio();
+      useLocalVoice("play() rejected");
+    }
+  );
 }
 
 function stopSpeaking() {
+  speakToken++; // invalidate any in-flight async speak
   setSpeaking(false);
-  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  stopAudio();
 }
 
 // ---- Click-through overlay (Stage 4.4 prerequisite) -----------------------
@@ -305,15 +517,8 @@ const ENTRANCE_MS = 650; // how long a shape takes to draw itself in
 // step would flash past and its box would look "not shown" (the "2 of 6 missing"
 // bug). Covers the entrance animation + a brief hold so every box is actually seen.
 const MIN_STEP_MS = ENTRANCE_MS + 700;
-let walk = null; // { steps, i, stepStart, raf, timer, done } | null
+let walk = null; // { steps, i, stepStart, raf, timer, done, accumulate, nextPrefetch } | null
 let awaitingAction = false; // true while a guide step is up, waiting for the user to act
-
-// When TTS is muted/unavailable, estimate how long the sentence would take to
-// read so the visuals still pace themselves (~170 wpm), with sane bounds.
-function estimateDurationMs(text) {
-  const words = (text || "").trim().split(/\s+/).filter(Boolean).length;
-  return Math.min(9000, Math.max(2000, words * 350 + 600));
-}
 
 function renderStepFrame(now) {
   if (!walk) return;
@@ -345,16 +550,13 @@ function playStep() {
   cancelAnimationFrame(walk.raf);
   walk.raf = requestAnimationFrame(renderStepFrame);
 
-  // Guard against a stale utterance/timer advancing a newer walkthrough; the
-  // guard also makes the onend + safety-timer pair idempotent (whichever fires
-  // first advances; the second sees a changed index and no-ops).
+  // advance() runs when the step's audio ENDS (or its stall/fallback fires). It's
+  // guarded so a stale call on a superseded step no-ops, and it holds each step for
+  // at least MIN_STEP_MS so its shape is actually seen.
   const myWalk = walk;
   const myIndex = walk.i;
   const advance = () => {
     if (walk !== myWalk || walk.i !== myIndex) return;
-    // Don't advance until the box has actually been visible long enough. If TTS
-    // ended/dropped early, hold the step for the remaining time instead of skipping
-    // it — this is what guarantees every box is seen (fixes "2 of 6 not shown").
     const elapsed = performance.now() - walk.stepStart;
     if (elapsed < MIN_STEP_MS) {
       clearTimeout(walk.timer);
@@ -364,15 +566,31 @@ function playStep() {
     nextStep();
   };
 
-  const estimate = estimateDurationMs(step.say);
-  if (speakStep(step.say, advance)) {
-    // Speaking: advance on onend, but keep a safety net — some Windows voices
-    // drop the onend event, which would otherwise stall the walkthrough.
-    walk.timer = setTimeout(advance, Math.max(estimate, MIN_STEP_MS) + 4000);
+  // Prefer the fully-downloaded Blob we prefetched during the previous step: it
+  // plays cleanly from 0 (a pre-buffered *streaming* element resumes at its live
+  // edge and clips the first syllable) and the swap is instant. If it isn't ready
+  // (first step, or not finished in time), stream this step live — a fresh element
+  // played immediately also starts cleanly.
+  const pf = walk.nextPrefetch;
+  walk.nextPrefetch = null;
+  let audio;
+  if (pf && pf.url) {
+    audio = new Audio(pf.url);
+    audio._blobUrl = pf.url; // own it → revoked when the step ends
   } else {
-    // Muted/unavailable: pace purely on the estimated reading time (≥ the floor).
-    walk.timer = setTimeout(advance, Math.max(estimate, MIN_STEP_MS));
+    if (pf) discardPrefetch(pf); // wasn't ready in time — drop it, stream live
+    audio = makeTtsAudio(step.say);
   }
+  // LOOK-AHEAD, but ONLY once THIS step has claimed the socket/voice (onStarted) —
+  // starting the next prefetch any earlier lets it race ahead on the shared Edge-TTS
+  // connection and starve the live-streamed first step, which then times out to the
+  // robotic voice. So defer the prefetch to onStarted rather than firing it here.
+  const prefetchNext = () => {
+    if (walk !== myWalk || walk.i !== myIndex) return;
+    const next = walk.steps[walk.i + 1];
+    walk.nextPrefetch = next ? startPrefetch(next.say) : null;
+  };
+  speakStep(step.say, audio, advance, prefetchNext);
 }
 
 function nextStep() {
@@ -408,10 +626,18 @@ function stopWalkthrough() {
   if (walk) {
     cancelAnimationFrame(walk.raf);
     clearTimeout(walk.timer);
+    // Clear the prefetch cache (Stop/Next/interruption) so we never swap to a
+    // now-stale step's audio; this also aborts an in-flight prefetch download.
+    discardPrefetch(walk.nextPrefetch);
+    walk.nextPrefetch = null;
     walk = null;
   }
   awaitingAction = false;
   stopSpeaking();
+  // Hard-kill the engine's Edge-TTS connection too: a stale in-flight prefetch
+  // (still streaming on the shared socket) would otherwise starve the next
+  // request. No-op in the engine when nothing is in flight.
+  if (window.lazyAI.ttsReset) window.lazyAI.ttsReset();
 }
 
 function startWalkthrough(steps, done = true, accumulate = false) {
@@ -422,7 +648,7 @@ function startWalkthrough(steps, done = true, accumulate = false) {
   els.askBtn.title = done ? "Ask" : "Continue"; // icon-only send button; title gives context
   clearCanvas();
   setAnswer("", ""); // audio only — hide the "Looking…" status; no narration subtitle
-  walk = { steps, i: 0, stepStart: 0, raf: 0, timer: 0, done, accumulate };
+  walk = { steps, i: 0, stepStart: 0, raf: 0, timer: 0, done, accumulate, nextPrefetch: null };
   playStep();
 }
 
@@ -477,16 +703,53 @@ function ask() {
   else window.lazyAI.startGuide(text);
 }
 
-// ---- Voice input (push-to-talk, local Whisper) ----------------------------
+// ---- Voice input (click OR push-to-talk → local Whisper, auto-submit) -------
+// Two ways in, same flow: CLICK the mic to toggle recording on/off, or HOLD Right
+// Alt (release to stop). Stopping transcribes + submits automatically — no Enter.
+// A live wave fills the input while listening (see setListening). Works for BOTH
+// DeskTutor and DeskPilot — stop routes to ask() → startGuide/startControl.
+const MIC_IDLE_TITLE = "Click to speak — or hold Right Alt";
 let mediaRecorder = null;
 let audioChunks = [];
 let audioStream = null;
+let recording = false; // true from the moment we begin acquiring the mic
+let stopRequested = false; // a release that landed before the recorder was ready
+
+// Toggle the "listening" UI: the in-field wave, the mic's active state, and the
+// floating "Listening…" pill — nothing instructional.
+function setListening(on) {
+  els.bar.classList.toggle("listening", on);
+  els.micBtn.classList.toggle("recording", on);
+  els.micBtn.title = on ? "Listening…" : MIC_IDLE_TITLE;
+  if (on) setAnswer("Listening…", "loading");
+}
 
 async function startRecording() {
+  if (recording) return; // ignore key auto-repeat / double triggers
+  // Smart interruption + clean slate (#3/#4): if Ava is mid-sentence or a guide is
+  // up, kill the audio + annotations and reset input so this is a brand-new request
+  // — and re-enable Send in case a prior flow left it disabled (the deadlock).
+  stopWalkthrough();
+  clearCanvas();
+  awaitingAction = false;
+  els.askBtn.disabled = false;
+  els.askBtn.title = overlayMode === "control" ? "Do it" : "Ask";
+  recording = true;
+  stopRequested = false;
   try {
     audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (err) {
+    recording = false;
+    setListening(false);
     setAnswer("Microphone access failed: " + (err?.message || err), "err");
+    return;
+  }
+  // A release can land while we're still acquiring the mic — honor it.
+  if (stopRequested) {
+    audioStream.getTracks().forEach((t) => t.stop());
+    audioStream = null;
+    recording = false;
+    setListening(false);
     return;
   }
   audioChunks = [];
@@ -496,24 +759,32 @@ async function startRecording() {
   };
   mediaRecorder.onstop = onRecordingStop;
   mediaRecorder.start();
-  els.micBtn.classList.add("recording"); // CSS swaps the mic glyph for a black stop-square
-  setAnswer("Listening… click the stop button when you're done speaking.", "loading");
+  setListening(true);
 }
 
 function stopRecording() {
-  if (mediaRecorder && mediaRecorder.state === "recording") mediaRecorder.stop();
+  if (!recording) return;
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    mediaRecorder.stop(); // → onRecordingStop
+  } else {
+    stopRequested = true; // recorder not ready yet — bail out once it is
+  }
 }
 
 async function onRecordingStop() {
-  els.micBtn.classList.remove("recording");
+  recording = false;
+  setListening(false);
   if (audioStream) audioStream.getTracks().forEach((t) => t.stop());
+  audioStream = null;
 
   const blob = new Blob(audioChunks, { type: mediaRecorder?.mimeType || "audio/webm" });
   if (!blob.size) {
     setAnswer("No audio captured — try again.", "err");
     return;
   }
-  setAnswer("Transcribing… (the first time downloads the speech model, ~140 MB)", "loading");
+  // No "Transcribing…" status: the model is bundled (no download) and fast, and
+  // we auto-submit — so clear the pill and go straight to the ask for an instant feel.
+  setAnswer("", "");
   try {
     const audio = await blobTo16kMono(blob);
     const result = await window.lazyAI.transcribe(audio);
@@ -523,7 +794,7 @@ async function onRecordingStop() {
     }
     const text = (result.text || "").trim();
     els.question.value = text;
-    if (text) ask(); // got speech → ask straight away
+    if (text) ask(); // got speech → ask/act straight away
     else setAnswer("Didn't catch that — try again.", "err");
   } catch (err) {
     setAnswer("Audio processing error: " + (err?.message || err), "err");
@@ -547,10 +818,21 @@ async function blobTo16kMono(blob) {
   return rendered.getChannelData(0); // Float32Array @ 16 kHz, mono
 }
 
+// Dual-mode mic: CLICK the button to toggle recording, OR hold Right Alt (release
+// to stop). Both drive the same startRecording / stopRecording flow.
 els.micBtn.addEventListener("click", () => {
-  if (mediaRecorder && mediaRecorder.state === "recording") stopRecording();
+  if (recording) stopRecording();
   else startRecording();
 });
+document.addEventListener("keydown", (e) => {
+  if (e.code === "AltRight" && !e.repeat) { e.preventDefault(); startRecording(); }
+});
+document.addEventListener("keyup", (e) => {
+  if (e.code === "AltRight") { e.preventDefault(); stopRecording(); }
+});
+// If the overlay loses focus while the key is held, keyup may never arrive —
+// stop so we don't record indefinitely.
+window.addEventListener("blur", () => { if (recording) stopRecording(); });
 
 // While a guide step is waiting, an empty Ask/Enter means "I've done it, continue".
 function askOrContinue() {
@@ -581,6 +863,7 @@ window.lazyAI.onOverlayShow((data) => {
   resizeCanvas();
   clearCanvas();
   setAnswer("", "");
+  els.askBtn.disabled = false; // fresh summon → never inherit a disabled Send button
   // Reflect the mode in the bar so it's obvious whether it will ACT or EXPLAIN.
   if (barTitle) barTitle.innerHTML = overlayMode === "control" ? "Desk<b>Pilot</b>" : "Desk<b>Tutor</b>";
   els.askBtn.title = overlayMode === "control" ? "Do it" : "Ask";

@@ -34,6 +34,7 @@ const settingsStore = require("./settings-store");
 const screenTeacher = require("./screen-teacher");
 const screenControl = require("./screen-control");
 const voiceEngine = require("./voice-engine");
+const ttsEngine = require("./tts-engine");
 
 // Screen Teacher summon hotkeys, in preference order (separate from the polish
 // summon key). Stage 4.
@@ -270,6 +271,27 @@ ipcMain.handle("transcribe", async (_event, audio) => {
     return { ok: false, error: String(err.message || err) };
   }
 });
+
+// Premium TTS (Phase 1B): synthesize spoken narration with the Edge-TTS "Ava"
+// voice and hand the MP3 back to the overlay as base64. Throwing here is fine —
+// the overlay falls back to the local Windows speechSynthesis voice on !ok.
+ipcMain.handle("speak", async (_event, { text, rate } = {}) => {
+  try {
+    const { audio, mime } = await ttsEngine.synthesize(text, { rate });
+    return { ok: true, audio: audio.toString("base64"), mime };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
+
+// Debug: surface the overlay's TTS decision path in the terminal alongside the
+// [tts] engine logs, so the whole Edge-TTS → fallback flow is visible in one place.
+ipcMain.on("tts-log", (_event, msg) => console.log("[overlay-tts]", msg));
+
+// Hard-kill the Edge-TTS connection when the overlay interrupts / starts a new
+// turn, so a stale in-flight prefetch can't keep streaming on the shared socket
+// and starve the next request. No-op in the engine when nothing is in flight.
+ipcMain.on("tts-reset", () => ttsEngine.resetConnection());
 
 // Renderer accepted a result and wants it pasted back into the source app.
 ipcMain.on("paste-result", async (_event, text) => {
@@ -558,6 +580,10 @@ async function captureScreen(maxLongEdge, maxPixels, format = "png") {
   };
 }
 
+// Resolves when the overlay renderer has finished loading (set in
+// createOverlayWindow). summonOverlay awaits it before sending "overlay-show".
+let overlayReadyPromise = null;
+
 function createOverlayWindow() {
   const display = currentDisplay();
   overlayWindow = new BrowserWindow({
@@ -574,6 +600,9 @@ function createOverlayWindow() {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      // Streamed Edge-TTS narration auto-plays without a click — the overlay is
+      // summoned by a hotkey, which isn't a web "user gesture", so allow autoplay.
+      autoplayPolicy: "no-user-gesture-required",
     },
   });
   overlayWindow.setAlwaysOnTop(true, "screen-saver");
@@ -583,6 +612,12 @@ function createOverlayWindow() {
   // for the user's action DURING narration without our own animation/pulse being
   // mistaken for a screen change.
   overlayWindow.setContentProtection(true);
+  // Resolve once the renderer has loaded (and registered its onOverlayShow
+  // listener), so summonOverlay never sends the mode before anyone is listening —
+  // that race made the FIRST Ctrl+Shift+A open DeskTutor instead of DeskPilot.
+  overlayReadyPromise = new Promise((resolve) => {
+    overlayWindow.webContents.once("did-finish-load", resolve);
+  });
   overlayWindow.loadFile(path.join(__dirname, "overlay.html"));
   overlayWindow.on("close", (event) => {
     if (!app.isQuitting) {
@@ -634,9 +669,13 @@ async function summonOverlay(mode) {
   overlayWindow.setBounds(currentDisplay().bounds);
   overlayWindow.show();
   overlayWindow.focus(); // keyboard focus (typing/Esc) is independent of mouse pass-through
+  ttsEngine.warmUp(); // pre-open the Edge-TTS socket so the first narration starts fast
   // Start click-through: annotations never trap the cursor; the bar re-enables
   // itself on hover. Keyboard still reaches the focused window for typing/Esc.
   overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+  // Wait until the renderer is loaded before sending the mode, or the FIRST summon
+  // (window still loading) loses the event and opens in the wrong mode (#5).
+  if (overlayReadyPromise) await overlayReadyPromise;
   overlayWindow.webContents.send("overlay-show", {
     mode,
     imageWidth: lastScreenshot.width,

@@ -45,4 +45,14 @@ contextBridge.exposeInMainWorld("lazyAI", {
   setIgnoreMouse: (ignore) => ipcRenderer.send("overlay-set-ignore-mouse", ignore),
   // Transcribe 16 kHz mono PCM (Float32Array) locally via Whisper → { ok, text }.
   transcribe: (audio) => ipcRenderer.invoke("transcribe", audio),
+  // Synthesize narration with the premium Edge-TTS "Ava" voice →
+  // { ok, audio: <base64 mp3>, mime } | { ok:false, error }. The overlay falls
+  // back to the local speechSynthesis voice when this isn't ok.
+  speak: (payload) => ipcRenderer.invoke("speak", payload),
+  // Debug: forward overlay TTS diagnostics to the main process so they show up in
+  // the terminal (the click-through overlay's own console is hard to observe).
+  ttsLog: (msg) => ipcRenderer.send("tts-log", msg),
+  // Hard-kill the Edge-TTS connection (interruption / new turn) so a stale prefetch
+  // can't starve the next request's socket.
+  ttsReset: () => ipcRenderer.send("tts-reset"),
 });

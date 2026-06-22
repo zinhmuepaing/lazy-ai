@@ -99,6 +99,38 @@ html, body {
   box-shadow: 0 0 0 3px var(--focus-ring); /* coral focus ring */
 }
 
+/* Field wrapper hosts the input + an overlaid recording wave (push-to-talk). */
+.field-wrap { position: relative; flex: 1; display: flex; }
+
+/* Live sound-wave shown INSIDE the field while recording; the input's text and
+   placeholder are hidden (transparent) so only the wave reads as "listening". */
+#mic-wave {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  pointer-events: none;
+}
+#bar.listening #mic-wave { display: flex; }
+#bar.listening #question { color: transparent; caret-color: transparent; }
+#bar.listening #question::placeholder { color: transparent; }
+#mic-wave i {
+  width: 3px;
+  height: 56%;
+  border-radius: 2px;
+  background: var(--accent);
+  transform-origin: center;
+  animation: wave 1s ease-in-out infinite; /* reuses the @keyframes wave below */
+}
+#mic-wave i:nth-child(2) { animation-delay: 0.1s; }
+#mic-wave i:nth-child(3) { animation-delay: 0.2s; }
+#mic-wave i:nth-child(4) { animation-delay: 0.3s; }
+#mic-wave i:nth-child(5) { animation-delay: 0.4s; }
+#mic-wave i:nth-child(6) { animation-delay: 0.5s; }
+#mic-wave i:nth-child(7) { animation-delay: 0.6s; }
+
 button {
   font-family: inherit;
   cursor: pointer;

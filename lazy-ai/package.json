@@ -5,7 +5,8 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node test/parse-plan.test.js && node test/teacher-linesnap.test.js"
+    "test": "node test/parse-plan.test.js && node test/teacher-linesnap.test.js",
+    "setup:models": "node scripts/download-models.mjs"
   },
   "author": "",
   "license": "MIT",
@@ -16,6 +17,7 @@
     "@huggingface/transformers": "^4.2.0",
     "dotenv": "^16.4.5",
     "mammoth": "^1.8.0",
+    "msedge-tts": "^2.0.6",
     "pdf-parse": "^1.1.1"
   }
 }

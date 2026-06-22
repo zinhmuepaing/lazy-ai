@@ -8,6 +8,7 @@
 
 const http = require("node:http");
 const { polish } = require("./polish-engine");
+const ttsEngine = require("./tts-engine");
 
 const PORT = 8788;
 
@@ -15,7 +16,7 @@ const PORT = 8788;
 // only ever binds to localhost, so it isn't reachable from the network.
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "content-type");
 }
 
@@ -51,6 +52,41 @@ function startLocalServer() {
       } catch (err) {
         res.writeHead(500, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: String(err.message || err) }));
+      }
+      return;
+    }
+
+    // Phase 1B (STREAMING): GET /tts?text=...&rate=1.05 → progressive audio/mpeg.
+    // The overlay points an <audio> element here; Chromium plays chunks as they
+    // arrive, so narration starts at first-chunk latency, not full-synthesis time.
+    if (req.method === "GET" && req.url.startsWith("/tts")) {
+      let stream = null;
+      try {
+        const u = new URL(req.url, `http://127.0.0.1:${PORT}`);
+        const text = u.searchParams.get("text") || "";
+        const rateRaw = u.searchParams.get("rate");
+        const rate = rateRaw ? parseFloat(rateRaw) : undefined;
+        const result = await ttsEngine.synthesizeStream(text, { rate });
+        stream = result.stream;
+        res.writeHead(200, { "content-type": result.mime, "cache-control": "no-store" });
+        res.flushHeaders(); // let the media element begin its pipeline immediately
+        let bytes = 0;
+        stream.on("data", (c) => { bytes += c.length; });
+        stream.on("end", () => console.log(`[tts] streamed ${bytes} bytes to client`));
+        stream.on("error", (err) => {
+          console.error(`[tts] stream error mid-flight: ${String(err.message || err)}`);
+          res.destroy();
+        });
+        res.on("close", () => { try { stream.destroy(); } catch {} }); // client disconnected
+        stream.pipe(res);
+      } catch (err) {
+        if (stream) { try { stream.destroy(); } catch {} }
+        if (!res.headersSent) {
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: String(err.message || err) }));
+        } else {
+          try { res.destroy(); } catch {}
+        }
       }
       return;
     }

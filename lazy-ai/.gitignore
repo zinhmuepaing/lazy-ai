@@ -3,3 +3,7 @@ node_modules/
 dist/
 out/
 *.log
+
+# Bundled Whisper model — large binaries, fetched by `npm run setup:models`
+# (re-downloadable; not committed to keep the repo lean).
+assets/models/
