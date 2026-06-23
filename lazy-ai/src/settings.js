@@ -103,6 +103,7 @@ els.saveBtn.addEventListener("click", async () => {
   if (els.keyAnthropic.value.trim()) keys.anthropic = els.keyAnthropic.value.trim();
   if (els.keyGemini.value.trim()) keys.gemini = els.keyGemini.value.trim();
   if (els.keyOpenai.value.trim()) keys.openai = els.keyOpenai.value.trim();
+  const savedAnthropic = Boolean(keys.anthropic); // for the confirmation message
 
   const result = await window.lazyAI.saveSettings({
     hotkey: els.hotkey.value,
@@ -128,6 +129,8 @@ els.saveBtn.addEventListener("click", async () => {
       `Saved — but ${result.prettyRequestedHotkey} is already used by another app, so Lizzie is still on ${result.prettyActiveHotkey}. Pick a different key if you want to change it.`,
       "err"
     );
+  } else if (savedAnthropic) {
+    setStatus(`Saved — Anthropic key stored & unlocked. Press ${result.prettyActiveHotkey} anywhere to summon Lizzie.`, "ok");
   } else {
     setStatus(`Saved. Press ${result.prettyActiveHotkey} anywhere to summon Lizzie.`, "ok");
   }

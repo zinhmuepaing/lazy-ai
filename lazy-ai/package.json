@@ -6,12 +6,61 @@
   "scripts": {
     "start": "electron .",
     "test": "node test/parse-plan.test.js && node test/teacher-linesnap.test.js",
-    "setup:models": "node scripts/download-models.mjs"
+    "setup:models": "node scripts/download-models.mjs",
+    "make:icon": "node scripts/make-icon.mjs",
+    "pack": "electron-builder --dir",
+    "dist": "npm run setup:models && npm run make:icon && electron-builder"
   },
   "author": "",
   "license": "MIT",
+  "build": {
+    "appId": "com.lizzie.app",
+    "productName": "Lizzie",
+    "copyright": "Copyright © Lizzie",
+    "directories": {
+      "output": "dist"
+    },
+    "asar": true,
+    "asarUnpack": [
+      "assets/models/**",
+      "src/*.ps1"
+    ],
+    "files": [
+      "**/*",
+      "!.env",
+      "!.env.*",
+      "!**/.env",
+      "!**/.env.*",
+      "!**/*.bak",
+      "!test/**",
+      "!tools/**",
+      "!scripts/**",
+      "!**/.cache/**",
+      "!**/*.map",
+      "!**/{.eslintrc,.eslintrc.js,.eslintrc.json,.editorconfig,.prettierrc}",
+      "!**/{.gitignore,.gitattributes}"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/icon.ico",
+      "artifactName": "LizzieSetup.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Lizzie",
+      "artifactName": "LizzieSetup.${ext}",
+      "runAfterFinish": true
+    }
+  },
   "devDependencies": {
-    "electron": "^33.0.0"
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",

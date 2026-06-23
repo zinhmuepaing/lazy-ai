@@ -21,6 +21,11 @@ const SYNTH_TIMEOUT_MS = 7000; // cap a hung socket so the IPC rejects (caller f
 let ttsPromise = null; // cached, metadata-configured MSEdgeTTS instance
 let queue = Promise.resolve(); // serializes synth calls over the one socket
 
+// Verbose pipeline tracing — OFF by default. Flip to true to debug the TTS flow in
+// the terminal. Genuine failures use console.error and are always shown.
+const TTS_DEBUG = false;
+const dlog = (...a) => { if (TTS_DEBUG) console.info(...a); };
+
 function withTimeout(promise, ms, label) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
@@ -36,18 +41,18 @@ function withTimeout(promise, ms, label) {
 // here — we reconnect lazily on the real call, or fall back to the local voice.
 function warmUp() {
   getTTS().then(
-    () => console.log("[tts] warmed up (connection ready)"),
-    (err) => console.log(`[tts] warm-up skipped: ${String((err && err.message) || err)}`)
+    () => dlog("[tts] warmed up (connection ready)"),
+    (err) => dlog(`[tts] warm-up skipped: ${String((err && err.message) || err)}`)
   );
 }
 
 function getTTS() {
   if (!ttsPromise) {
     ttsPromise = (async () => {
-      console.log(`[tts] opening Edge-TTS connection (voice=${VOICE})…`);
+      dlog(`[tts] opening Edge-TTS connection (voice=${VOICE})…`);
       const tts = new MsEdgeTTS();
       await tts.setMetadata(VOICE, FORMAT);
-      console.log("[tts] Edge-TTS connection established");
+      dlog("[tts] Edge-TTS connection established");
       return tts;
     })();
     ttsPromise.catch(() => {
@@ -71,7 +76,7 @@ function socketAlive(tts) {
 // nothing is in flight, so a clean new turn keeps its (fast) warm socket.
 function resetConnection() {
   if (pendingStreams === 0) return;
-  console.log("[tts] hard kill: closing the Edge-TTS connection to drop stale audio");
+  dlog("[tts] hard kill: closing the Edge-TTS connection to drop stale audio");
   const prev = ttsPromise;
   ttsPromise = null;
   streamGate = Promise.resolve(); // fresh queue — don't wait on the killed stream
@@ -109,7 +114,7 @@ function collectStream(stream) {
 
 async function synthesizeOnce(text, rate) {
   const tts = await getTTS();
-  console.log("[tts] connection ready; streaming audio…");
+  dlog("[tts] connection ready; streaming audio…");
   const result = tts.toStream(text, buildOptions(rate));
   // Newer msedge-tts returns { audioStream, metadataStream }; older returns a
   // bare Readable. Handle both.
@@ -124,13 +129,13 @@ async function synthesizeOnce(text, rate) {
 async function synthesize(text, { rate } = {}) {
   const clean = String(text || "").trim();
   if (!clean) throw new Error("No text to speak");
-  console.log(`[tts] request: "${clean.slice(0, 48)}${clean.length > 48 ? "…" : ""}" (${clean.length} chars) voice=${VOICE}`);
+  dlog(`[tts] request: "${clean.slice(0, 48)}${clean.length > 48 ? "…" : ""}" (${clean.length} chars) voice=${VOICE}`);
 
   const run = queue.then(() => withTimeout(synthesizeOnce(clean, rate), SYNTH_TIMEOUT_MS, "Edge-TTS"));
   queue = run.catch(() => {}); // keep the chain alive regardless of outcome
   try {
     const out = await run;
-    console.log(`[tts] success: ${out.audio.length} bytes mp3`);
+    dlog(`[tts] success: ${out.audio.length} bytes mp3`);
     return out;
   } catch (err) {
     console.error(`[tts] FAILED → caller falls back to speechSynthesis: ${String(err && err.message || err)}`);
@@ -154,7 +159,7 @@ function synthesizeStream(text, { rate } = {}) {
   // correctly WAITING for the active stream instead of racing it for bandwidth.
   pendingStreams += 1;
   const queued = pendingStreams - 1;
-  console.log(`[tts] stream request${queued > 0 ? ` (queued behind ${queued})` : ""}: "${clean.slice(0, 48)}${clean.length > 48 ? "…" : ""}" (${clean.length} chars) voice=${VOICE}`);
+  dlog(`[tts] stream request${queued > 0 ? ` (queued behind ${queued})` : ""}: "${clean.slice(0, 48)}${clean.length > 48 ? "…" : ""}" (${clean.length} chars) voice=${VOICE}`);
 
   // Don't start a new synthesis on the shared socket until the previous stream
   // has finished; advance the gate when this one ends/closes/errors.
@@ -163,11 +168,11 @@ function synthesizeStream(text, { rate } = {}) {
     // A warm connection can idle out (Edge closes it); reconnect if the socket
     // isn't OPEN, or the first request would hang until the fallback timeout.
     if (!socketAlive(tts)) {
-      console.log("[tts] cached connection is stale — reconnecting");
+      dlog("[tts] cached connection is stale — reconnecting");
       ttsPromise = null;
       tts = await getTTS();
     }
-    console.log("[tts] connection ready; streaming…");
+    dlog("[tts] connection ready; streaming…");
     const result = tts.toStream(clean, buildOptions(rate));
     const stream = result && result.audioStream ? result.audioStream : result;
     // 'end'/'close'/'error' don't flip the stream into flowing mode, so attaching

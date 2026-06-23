@@ -12,13 +12,25 @@ const os = require("node:os");
 const { execFile } = require("node:child_process");
 
 const isWindows = process.platform === "win32";
-const GRAB_SCRIPT = path.join(__dirname, "grab-selection.ps1");
-const PASTE_SCRIPT = path.join(__dirname, "paste-result.ps1");
-const CONTROL_SCRIPT = path.join(__dirname, "control-action.ps1");
-const BATCH_SCRIPT = path.join(__dirname, "control-batch.ps1");
-const UIA_QUERY_SCRIPT = path.join(__dirname, "uia-query.ps1");
-const FOREGROUND_SCRIPT = path.join(__dirname, "foreground.ps1");
-const OCR_SCRIPT = path.join(__dirname, "ocr-lines.ps1");
+
+// Resolve a bundled .ps1 next to this file. These scripts are run by an EXTERNAL
+// powershell.exe, which cannot read from inside the packed `app.asar` archive.
+// In a packaged build they're asarUnpack'd to `app.asar.unpacked/src/`, so when
+// __dirname points into `app.asar` we redirect to the real on-disk copy. The
+// regex only matches `app.asar` followed by a separator (not `app.asar.unpacked`),
+// so it's a no-op in dev and idempotent when already unpacked.
+function scriptPath(name) {
+  const p = path.join(__dirname, name);
+  return p.replace(/app\.asar([\\/])/, "app.asar.unpacked$1");
+}
+
+const GRAB_SCRIPT = scriptPath("grab-selection.ps1");
+const PASTE_SCRIPT = scriptPath("paste-result.ps1");
+const CONTROL_SCRIPT = scriptPath("control-action.ps1");
+const BATCH_SCRIPT = scriptPath("control-batch.ps1");
+const UIA_QUERY_SCRIPT = scriptPath("uia-query.ps1");
+const FOREGROUND_SCRIPT = scriptPath("foreground.ps1");
+const OCR_SCRIPT = scriptPath("ocr-lines.ps1");
 
 // Run a PowerShell script file, resolving with trimmed stdout.
 function runScript(scriptPath, args = [], timeoutMs = 5000) {

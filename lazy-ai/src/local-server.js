@@ -70,9 +70,6 @@ function startLocalServer() {
         stream = result.stream;
         res.writeHead(200, { "content-type": result.mime, "cache-control": "no-store" });
         res.flushHeaders(); // let the media element begin its pipeline immediately
-        let bytes = 0;
-        stream.on("data", (c) => { bytes += c.length; });
-        stream.on("end", () => console.log(`[tts] streamed ${bytes} bytes to client`));
         stream.on("error", (err) => {
           console.error(`[tts] stream error mid-flight: ${String(err.message || err)}`);
           res.destroy();

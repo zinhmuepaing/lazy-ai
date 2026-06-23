@@ -25,15 +25,16 @@
       <label class="field-label" for="screenTeacherModel">Desk<b>Tutor</b> model <span class="optional">(vision; accuracy vs speed)</span></label>
       <select id="screenTeacherModel"></select>
 
-      <label class="field-label">API keys <span class="optional">(stored encrypted; leave blank to keep current)</span></label>
+      <label class="field-label">API keys <span class="optional">(encrypted on this PC; leave blank to keep current)</span></label>
 
-      <label class="key-label" for="key-anthropic">Anthropic <span id="status-anthropic" class="key-status"></span></label>
+      <label class="key-label" for="key-anthropic">Anthropic <span class="optional">— required; unlocks all of Lizzie</span> <span id="status-anthropic" class="key-status"></span></label>
       <input id="key-anthropic" type="password" placeholder="sk-ant-..." autocomplete="off" />
+      <p class="hint">Paste your key and Save — features unlock immediately, no restart needed. Get a key from console.anthropic.com.</p>
 
-      <label class="key-label" for="key-gemini">Google Gemini <span id="status-gemini" class="key-status"></span></label>
+      <label class="key-label" for="key-gemini">Google Gemini <span class="optional">— optional (Polisher alternative)</span> <span id="status-gemini" class="key-status"></span></label>
       <input id="key-gemini" type="password" placeholder="AIza..." autocomplete="off" />
 
-      <label class="key-label" for="key-openai">OpenAI <span id="status-openai" class="key-status"></span></label>
+      <label class="key-label" for="key-openai">OpenAI <span class="optional">— optional (Polisher alternative)</span> <span id="status-openai" class="key-status"></span></label>
       <input id="key-openai" type="password" placeholder="sk-..." autocomplete="off" />
 
       <button id="saveBtn" class="primary">Save settings</button>

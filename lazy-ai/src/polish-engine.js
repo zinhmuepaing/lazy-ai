@@ -50,7 +50,7 @@ function buildUserMessage({ promptText, context, fileName, fileText, fileImage }
 // ---------------------------------------------------------------------------
 async function callAnthropic(apiModel, userMessage, image) {
   const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) throw new Error("ANTHROPIC_API_KEY is missing from .env");
+  if (!key) throw new Error("ANTHROPIC_API_KEY is missing — set it in Settings or .env");
 
   // Anthropic accepts content as a plain string or, for vision, an array of
   // text + image blocks.
@@ -84,7 +84,7 @@ async function callAnthropic(apiModel, userMessage, image) {
 
 async function callGemini(apiModel, userMessage, image) {
   const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error("GEMINI_API_KEY is missing from .env");
+  if (!key) throw new Error("GEMINI_API_KEY is missing — set it in Settings or .env");
 
   const parts = image
     ? [{ text: userMessage }, { inline_data: { mime_type: image.mediaType, data: image.base64 } }]
@@ -108,7 +108,7 @@ async function callGemini(apiModel, userMessage, image) {
 
 async function callOpenAI(apiModel, userMessage, image) {
   const key = process.env.OPENAI_API_KEY;
-  if (!key) throw new Error("OPENAI_API_KEY is missing from .env");
+  if (!key) throw new Error("OPENAI_API_KEY is missing — set it in Settings or .env");
 
   // For vision, OpenAI takes the user content as an array of text + image_url
   // (a data: URL) parts.

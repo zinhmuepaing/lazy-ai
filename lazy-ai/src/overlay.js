@@ -235,9 +235,11 @@ const TTS_STREAM_BASE = "http://localhost:8788/tts";
 let currentAudio = null; // the <audio> element currently streaming Edge-TTS, if any
 let speakToken = 0; // bumps on every speakStep()/stopSpeaking() so stale results no-op
 
-// Diagnostics: log to the overlay's own console AND forward to the main process
-// (terminal) so the whole TTS decision path is visible in one place while debugging.
+// Diagnostics — OFF by default. Flip TTS_DEBUG to true to trace the TTS decision
+// path in the overlay console AND the terminal (via the tts-log IPC).
+const TTS_DEBUG = false;
 function tlog(...a) {
+  if (!TTS_DEBUG) return;
   console.log("[overlay-tts]", ...a);
   try {
     if (window.lazyAI.ttsLog) {
