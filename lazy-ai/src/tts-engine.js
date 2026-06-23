@@ -51,7 +51,33 @@ function getTTS() {
     ttsPromise = (async () => {
       dlog(`[tts] opening Edge-TTS connection (voice=${VOICE})…`);
       const tts = new MsEdgeTTS();
+      // ROOT-CAUSE GUARD for the msedge-tts crash. The library deletes its stream
+      // entry the instant the audio Readable is destroyed (which happens on every
+      // prefetch swap, interruption, or hard close), but Edge keeps streaming frames
+      // for that request over the shared socket. Its onmessage handler then blindly
+      // does `this._streams[requestId].audio.push(...)` and throws on the now-deleted
+      // entry — TypeError: Cannot read properties of undefined (reading 'audio') —
+      // which surfaces as the "A JavaScript error occurred in the main process" dialog.
+      // Wrap `_streams` so a frame for a closed/unknown request lands in a no-op sink
+      // instead of crashing. Set / delete / for-in all behave normally.
+      try {
+        const SINK = { audio: { push() {} }, metadata: { push() {} } };
+        tts._streams = new Proxy(tts._streams || {}, {
+          get(target, prop, receiver) {
+            if (typeof prop !== "string" || prop in target) return Reflect.get(target, prop, receiver);
+            return SINK; // late frame for a stream that already ended / was closed
+          },
+        });
+      } catch {}
       await tts.setMetadata(VOICE, FORMAT);
+      // Also keep a listener on the underlying websocket: a hard close mid-stream can
+      // emit a late "error", and a ws "error" with no listener would itself crash main.
+      try {
+        const ws = tts && tts._ws;
+        if (ws && typeof ws.on === "function") {
+          ws.on("error", (e) => dlog(`[tts] socket error (ignored): ${String((e && e.message) || e)}`));
+        }
+      } catch {}
       dlog("[tts] Edge-TTS connection established");
       return tts;
     })();

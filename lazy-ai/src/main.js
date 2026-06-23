@@ -36,6 +36,20 @@ const screenControl = require("./screen-control");
 const voiceEngine = require("./voice-engine");
 const ttsEngine = require("./tts-engine");
 
+// Resilience net. A benign hiccup in the streamed Edge-TTS path — e.g. the shared
+// socket being hard-closed mid-stream when narration is interrupted or a new turn
+// starts — can surface as an unhandled rejection or a late socket "error" in this
+// process. Electron's default turns those into the modal "A JavaScript error occurred
+// in the main process" dialog and aborts the narration. Log them instead, so the app
+// stays alive and the overlay simply falls back to the local voice — never popping
+// that dialog. (Genuine bugs are still printed with a full stack.)
+process.on("unhandledRejection", (reason) => {
+  console.error("[main] unhandledRejection (ignored):", (reason && reason.stack) || reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[main] uncaughtException (ignored):", (err && err.stack) || err);
+});
+
 // Screen Teacher summon hotkeys, in preference order (separate from the polish
 // summon key). Stage 4.
 const SCREEN_TEACHER_CANDIDATES = [
@@ -105,6 +119,7 @@ let guideActive = false;
 let guideGoal = "";
 let guideHistory = []; // Anthropic messages (text-only) carried across turns
 let guideTurn = 0;
+let guideStreamAbort = null; // AbortController for the in-flight streamed Teacher turn
 let watchTimer = null; // setTimeout handle for the screen-change poll
 let watchPrev = null; // previous poll thumbnail (RGBA Buffer) for diffing
 let watchDirty = false; // true once the screen has started changing (user acting)
@@ -737,6 +752,7 @@ function stopWatching() {
 
 function stopGuide() {
   guideActive = false;
+  if (guideStreamAbort) { guideStreamAbort.abort(); guideStreamAbort = null; } // cancel any in-flight stream
   stopWatching();
 }
 
@@ -904,6 +920,15 @@ async function runGuideTurn({ useExistingShot }) {
     if (!guideActive) return; // dismissed while OCR ran
   }
 
+  // Stream the answer so step 0 narrates/draws the instant it parses, while the model
+  // is still generating the rest — this is the big time-to-first-audio win. main
+  // forwards each step to the overlay: step 0 starts the walkthrough, later steps
+  // append, and steps-done closes the list so playback can finish at the end.
+  if (guideStreamAbort) guideStreamAbort.abort(); // supersede any prior in-flight turn
+  const abort = new AbortController();
+  guideStreamAbort = abort;
+  let firstSent = false;
+  let turnDone = true; // updated by onMeta (done/accumulate stream before the steps)
   let res;
   try {
     res = await screenTeacher.askAboutScreen({
@@ -916,17 +941,54 @@ async function runGuideTurn({ useExistingShot }) {
       turnText,
       model,
       ocrLines,
+      signal: abort.signal,
+      onMeta: ({ done }) => { turnDone = done; },
+      onStep: (step, i) => {
+        if (!guideActive || !overlayWindow) return;
+        if (i === 0) {
+          firstSent = true;
+          overlayWindow.webContents.send("overlay-play-steps", {
+            steps: [step], // Teacher draw-coords are absolute pixels in screenshot space
+            done: turnDone,
+            // Force REPLACE mode: each step's annotation clears as the next is spoken
+            // (the model's accumulate build-up is intentionally ignored for DeskTutor).
+            accumulate: false,
+            imageWidth: shot.width,
+            imageHeight: shot.height,
+            streaming: true, // more steps will arrive via overlay-append-step
+          });
+        } else {
+          overlayWindow.webContents.send("overlay-append-step", { step });
+        }
+      },
     });
   } catch (err) {
     res = { ok: false, error: String(err.message || err) };
+  } finally {
+    if (guideStreamAbort === abort) guideStreamAbort = null;
   }
 
   if (!guideActive) return; // user dismissed while we were waiting on the API
 
   if (!res.ok) {
-    sendOverlayStatus(res.error || "Something went wrong.", "err");
+    if (res.aborted) return; // a newer turn / stop superseded us — it now owns the overlay
+    if (!firstSent) { sendOverlayStatus(res.error || "Something went wrong.", "err"); stopGuide(); return; }
+    overlayWindow.webContents.send("overlay-steps-done"); // some steps played → close cleanly
     stopGuide();
     return;
+  }
+
+  // No step ever parsed (rare) → a single spoken fallback so the overlay isn't empty.
+  if (!firstSent) {
+    overlayWindow.webContents.send("overlay-play-steps", {
+      steps: [{ say: "Done.", draw: [] }],
+      done: res.done,
+      accumulate: false,
+      imageWidth: shot.width,
+      imageHeight: shot.height,
+    });
+  } else {
+    overlayWindow.webContents.send("overlay-steps-done"); // list complete — overlay may finish at the end
   }
 
   // Carry the turn forward as text only (drop the image to keep tokens sane).
@@ -934,18 +996,8 @@ async function runGuideTurn({ useExistingShot }) {
   guideHistory.push({ role: "assistant", content: [{ type: "text", text: res.raw }] });
   guideTurn += 1;
 
-  overlayWindow.webContents.send("overlay-play-steps", {
-    steps: res.steps, // Teacher draw-coords are absolute pixels in screenshot space
-    done: res.done,
-    accumulate: res.accumulate,
-    imageWidth: shot.width,
-    imageHeight: shot.height,
-  });
-
-  // Start watching for the user's action immediately — in PARALLEL with the
-  // narration — so a click made mid-instruction is caught on the next poll
-  // instead of only after the voiceover finishes. (Our overlay is excluded from
-  // capture, so its animation never trips the detector.)
+  // Watch for the user's action in PARALLEL with narration so a click made
+  // mid-instruction is caught on the next poll, not only after the voiceover ends.
   if (res.done) stopGuide();
   else startWatching();
 }

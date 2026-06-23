@@ -32,8 +32,12 @@ contextBridge.exposeInMainWorld("lazyAI", {
   guideContinue: () => ipcRenderer.send("guide-continue"),
   // Screen Control (Stage 5): hand a command to main, which plans + performs it.
   startControl: (command) => ipcRenderer.send("start-control", command),
-  // Main pushes a walkthrough to play: { steps, done, imageWidth, imageHeight }.
+  // Main pushes a walkthrough to play: { steps, done, imageWidth, imageHeight, streaming }.
   onPlaySteps: (callback) => ipcRenderer.on("overlay-play-steps", (_event, data) => callback(data || {})),
+  // Streaming DeskTutor: main appends each later step as it parses ({ step }), then
+  // signals the list is complete so playback can finish at the end.
+  onAppendStep: (callback) => ipcRenderer.on("overlay-append-step", (_event, data) => callback(data || {})),
+  onStepsDone: (callback) => ipcRenderer.on("overlay-steps-done", () => callback()),
   // Status/caption updates from the loop (loading / error / hints).
   onGuideStatus: (callback) => ipcRenderer.on("overlay-status", (_event, data) => callback(data || {})),
   // Main asks us to wipe the canvas (e.g. just before re-capturing a clean shot).

@@ -5,7 +5,7 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node test/parse-plan.test.js && node test/teacher-linesnap.test.js",
+    "test": "node test/parse-plan.test.js && node test/teacher-linesnap.test.js && node test/step-stream.test.js",
     "setup:models": "node scripts/download-models.mjs",
     "make:icon": "node scripts/make-icon.mjs",
     "pack": "electron-builder --dir",

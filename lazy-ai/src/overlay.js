@@ -62,7 +62,7 @@ function baseStroke() {
 const easeOut = (t) => 1 - Math.pow(1 - t, 3);
 const STATIC = { progress: 1, pulse: 0, alpha: 1 }; // fully-revealed, no glow
 
-function styleStroke(pulse) {
+function styleStroke(pulse, dashed = false) {
   ctx.strokeStyle = ACCENT;
   ctx.fillStyle = ACCENT;
   ctx.lineWidth = baseStroke() * (0.85 + 0.35 * pulse);
@@ -70,6 +70,12 @@ function styleStroke(pulse) {
   ctx.lineJoin = "round";
   ctx.shadowColor = ACCENT;
   ctx.shadowBlur = 18 * pulse; // the "highlight" — pulses while a step is spoken
+  // "dashed" construction lines (inferred/constructive geometry) render dotted; solid
+  // shapes clear any dash. Scaled to the stroke so it reads at any DPI. setLineDash is
+  // part of the saved ctx state, so each shape's save()/restore() isolates it — and it
+  // applies to the PARTIAL path of the stroke-draw animation, so dashes draw on live.
+  const u = baseStroke();
+  ctx.setLineDash(dashed ? [u * 2.4, u * 2.4] : []);
 }
 
 function drawLabel(x, y, text, alpha = 1) {
@@ -95,23 +101,24 @@ function drawLabel(x, y, text, alpha = 1) {
   ctx.restore();
 }
 
-function drawArrow(from, to, label, a) {
+function drawArrow(from, to, label, a, dashed) {
   const { progress, pulse, alpha } = a;
   ctx.save();
   ctx.globalAlpha = alpha;
-  styleStroke(pulse);
+  styleStroke(pulse, dashed);
   const [x1, y1] = from;
   const [x2, y2] = to;
-  // shaft grows from tail to tip as the step is narrated
-  const tipX = x1 + (x2 - x1) * progress;
-  const tipY = y1 + (y2 - y1) * progress;
+  // shaft is stroked from tail to tip with an easeOut "flick", like a real pen
+  const p = easeOut(Math.min(1, progress));
+  const tipX = x1 + (x2 - x1) * p;
+  const tipY = y1 + (y2 - y1) * p;
   ctx.beginPath();
   ctx.moveTo(x1, y1);
   ctx.lineTo(tipX, tipY);
   ctx.stroke();
   // arrowhead fades in over the last stretch, riding the current tip
-  if (progress > 0.55) {
-    ctx.globalAlpha = alpha * Math.min(1, (progress - 0.55) / 0.45);
+  if (p > 0.55) {
+    ctx.globalAlpha = alpha * Math.min(1, (p - 0.55) / 0.45);
     const angle = Math.atan2(y2 - y1, x2 - x1);
     const head = baseStroke() * 4;
     ctx.beginPath();
@@ -150,40 +157,59 @@ function drawHighlight(x, y, w, h, label, a) {
   if (label && progress > 0.4) drawLabel(x, y - 6, label, alpha);
 }
 
-function drawBox(x, y, w, h, label, a) {
+function drawBox(x, y, w, h, label, a, dashed) {
   const { progress, pulse, alpha } = a;
   ctx.save();
-  ctx.globalAlpha = alpha * Math.min(1, progress / 0.4); // fade in early
-  styleStroke(pulse);
-  // a touch of grow-from-center on entrance, settling to the true rect
-  const s = 0.94 + 0.06 * easeOut(progress);
-  const cx = x + w / 2;
-  const cy = y + h / 2;
-  ctx.strokeRect(cx - (w * s) / 2, cy - (h * s) / 2, w * s, h * s);
+  ctx.globalAlpha = alpha;
+  styleStroke(pulse, dashed);
+  // Hand-drawn trace: a pen draws the perimeter clockwise from the top-left corner —
+  // top edge, then right, bottom, and left — revealed by progress, so it looks
+  // sketched live rather than just fading in. At progress 1 it's the full rectangle.
+  let rem = (2 * (w + h)) * easeOut(Math.min(1, progress)); // perimeter length drawn so far
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  const edge = (len, fromX, fromY, toX, toY) => {
+    if (rem <= 0) return;
+    const t = Math.min(1, rem / len);
+    ctx.lineTo(fromX + (toX - fromX) * t, fromY + (toY - fromY) * t);
+    rem -= len;
+  };
+  edge(w, x, y, x + w, y);             // top:    left  -> right
+  edge(h, x + w, y, x + w, y + h);     // right:  top   -> bottom
+  edge(w, x + w, y + h, x, y + h);     // bottom: right -> left
+  edge(h, x, y + h, x, y);             // left:   bottom-> top (closes the loop)
+  ctx.stroke();
   ctx.restore();
   if (label && progress > 0.4) drawLabel(x, y - 6, label, alpha);
 }
 
-function drawCircle(cx, cy, r, label, a) {
+function drawCircle(cx, cy, r, label, a, dashed) {
   const { progress, pulse, alpha } = a;
   ctx.save();
   ctx.globalAlpha = alpha;
-  styleStroke(pulse);
+  styleStroke(pulse, dashed);
+  // Pen sweeps the loop from the top with an easeOut and a slight overshoot past the
+  // start point — the way a tutor closes a hand-drawn circle.
+  const start = -Math.PI / 2;
+  const sweep = Math.PI * 2 * easeOut(Math.min(1, progress)) * 1.05;
   ctx.beginPath();
-  ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress); // sweep in
+  ctx.arc(cx, cy, r, start, start + sweep);
   ctx.stroke();
   ctx.restore();
   if (label && progress > 0.5) drawLabel(cx - r, cy - r - 6, label, alpha);
 }
 
-function drawLine(from, to, a) {
+function drawLine(from, to, a, dashed) {
   const { progress, pulse, alpha } = a;
   ctx.save();
   ctx.globalAlpha = alpha;
-  styleStroke(pulse);
+  styleStroke(pulse, dashed);
+  // Stroked ALONG the path from->to with an easeOut, so direction reads (e.g. a
+  // height line draws from the top point down to the bottom). The model orders from/to.
+  const p = easeOut(Math.min(1, progress));
   ctx.beginPath();
   ctx.moveTo(from[0], from[1]);
-  ctx.lineTo(from[0] + (to[0] - from[0]) * progress, from[1] + (to[1] - from[1]) * progress);
+  ctx.lineTo(from[0] + (to[0] - from[0]) * p, from[1] + (to[1] - from[1]) * p);
   ctx.stroke();
   ctx.restore();
 }
@@ -191,12 +217,13 @@ function drawLine(from, to, a) {
 // Draw one [DRAW] shape at the given animation phase.
 function drawInstruction(ins, a) {
   try {
+    const dashed = ins.style === "dashed"; // constructive / inferred geometry → dotted stroke
     switch (ins.shape) {
-      case "arrow": drawArrow(ins.from, ins.to, ins.label, a); break;
+      case "arrow": drawArrow(ins.from, ins.to, ins.label, a, dashed); break;
       case "highlight": drawHighlight(ins.x, ins.y, ins.w, ins.h, ins.label, a); break;
-      case "box": drawBox(ins.x, ins.y, ins.w, ins.h, ins.label, a); break;
-      case "circle": drawCircle(ins.x, ins.y, ins.r, ins.label, a); break;
-      case "line": drawLine(ins.from, ins.to, a); break;
+      case "box": drawBox(ins.x, ins.y, ins.w, ins.h, ins.label, a, dashed); break;
+      case "circle": drawCircle(ins.x, ins.y, ins.r, ins.label, a, dashed); break;
+      case "line": drawLine(ins.from, ins.to, a, dashed); break;
       case "label": drawLabel(ins.x, ins.y, ins.text, a.alpha * a.progress); break;
     }
   } catch {
@@ -537,7 +564,23 @@ function renderStepFrame(now) {
       for (const ins of walk.steps[k].draw || []) drawInstruction(ins, STATIC);
     }
   }
-  for (const ins of step.draw || []) drawInstruction(ins, { progress, pulse, alpha: 1 });
+  const draw = step.draw || [];
+  if (draw.length) {
+    for (const ins of draw) drawInstruction(ins, { progress, pulse, alpha: 1 });
+  } else if (!walk.accumulate) {
+    // The model sometimes narrates a step with NO annotation — a transition sentence,
+    // or a code-anchored shape that failed to resolve (OCR line-snap) and was dropped.
+    // In replace mode that would blank the screen mid-explanation, so instead hold the
+    // most recent prior annotation (static) — the relevant visual stays up while the
+    // narrator keeps talking, rather than flashing to nothing.
+    for (let k = walk.i - 1; k >= 0; k--) {
+      const prior = walk.steps[k].draw || [];
+      if (prior.length) {
+        for (const ins of prior) drawInstruction(ins, STATIC);
+        break;
+      }
+    }
+  }
   walk.raf = requestAnimationFrame(renderStepFrame);
 }
 
@@ -600,10 +643,26 @@ function nextStep() {
   clearTimeout(walk.timer);
   walk.i += 1;
   if (walk.i >= walk.steps.length) {
+    // Streaming: more steps may still be on the way → HOLD at the end (freeze the last
+    // frame, which already includes any carry-over) until the next step appends or the
+    // list is marked complete. Non-streaming: finish exactly as before.
+    if (walk.streaming && !walk.complete) {
+      walk.waiting = true;
+      cancelAnimationFrame(walk.raf);
+      return;
+    }
     finishWalkthrough();
     return;
   }
   playStep();
+}
+
+// A streamed step arrived (or the list was marked complete) while we were holding at
+// the end of what we had: resume playback if the next step is now here, else finish.
+function resumeIfWaiting() {
+  if (!walk || !walk.waiting) return;
+  if (walk.i < walk.steps.length) { walk.waiting = false; playStep(); }
+  else if (walk.complete) { walk.waiting = false; finishWalkthrough(); }
 }
 
 // After the last sentence: stop animating but leave the final state on screen
@@ -615,10 +674,17 @@ function finishWalkthrough() {
   clearTimeout(walk.timer);
   const steps = walk.steps;
   const accumulate = walk.accumulate;
+  const done = walk.done;
   clearCanvas();
-  const resting = accumulate ? steps : [steps[steps.length - 1]];
-  for (const s of resting) {
-    for (const ins of s.draw || []) drawInstruction(ins, STATIC);
+  // A completed EXPLANATION (done:true) is ephemeral: once the narration ends, the
+  // annotations are wiped so nothing lingers on the user's screen. A GUIDE step
+  // (done:false) must instead KEEP its annotation up after the voice stops, so the
+  // user can still see what to click/act on until they actually do it.
+  if (!done) {
+    const resting = accumulate ? steps : [steps[steps.length - 1]];
+    for (const s of resting) {
+      for (const ins of s.draw || []) drawInstruction(ins, STATIC);
+    }
   }
   walk = null;
 }
@@ -642,7 +708,7 @@ function stopWalkthrough() {
   if (window.lazyAI.ttsReset) window.lazyAI.ttsReset();
 }
 
-function startWalkthrough(steps, done = true, accumulate = false) {
+function startWalkthrough(steps, done = true, accumulate = false, streaming = false) {
   stopWalkthrough();
   // While guiding (done:false) the bar's button means "I've done it, continue"
   // — a manual fallback in case auto-detection ever misses the action.
@@ -650,7 +716,9 @@ function startWalkthrough(steps, done = true, accumulate = false) {
   els.askBtn.title = done ? "Ask" : "Continue"; // icon-only send button; title gives context
   clearCanvas();
   setAnswer("", ""); // audio only — hide the "Looking…" status; no narration subtitle
-  walk = { steps, i: 0, stepStart: 0, raf: 0, timer: 0, done, accumulate, nextPrefetch: null };
+  // streaming: more steps arrive via onAppendStep; complete=false makes nextStep WAIT
+  // at the end instead of finishing, until onStepsDone marks the list complete.
+  walk = { steps, i: 0, stepStart: 0, raf: 0, timer: 0, done, accumulate, nextPrefetch: null, streaming, complete: !streaming, waiting: false };
   playStep();
 }
 
@@ -675,8 +743,21 @@ window.lazyAI.onPlaySteps((data) => {
   }
   els.askBtn.disabled = false;
   const steps = data.steps && data.steps.length ? data.steps : [{ say: "Done.", draw: [] }];
-  startWalkthrough(steps, data.done !== false, data.accumulate === true); // undefined → done, replace
+  startWalkthrough(steps, data.done !== false, data.accumulate === true, data.streaming === true); // undefined → done, replace
   if (overlayMode === "control") els.askBtn.title = "Do it"; // keep control-mode label
+});
+
+// Streaming (DeskTutor): main appends each later step as it parses, then marks the list
+// complete — so playback starts on step 0 without waiting for the whole reply.
+window.lazyAI.onAppendStep((data) => {
+  if (!walk || !data || !data.step) return;
+  walk.steps.push(data.step);
+  resumeIfWaiting();
+});
+window.lazyAI.onStepsDone(() => {
+  if (!walk) return;
+  walk.complete = true;
+  resumeIfWaiting();
 });
 
 // Loading / error / hint captions from the loop.

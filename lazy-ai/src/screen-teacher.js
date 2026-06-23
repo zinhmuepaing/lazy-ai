@@ -65,7 +65,9 @@ you reply with ONLY this JSON object and NOTHING else:
   {"say":"the next sentence","draw":[ <shape> ]}
 ]}
 
-"steps" is an ordered list of narration moments. "say" is the sentence the narrator speaks at that moment. "draw" is the annotation(s) that appear WHILE that sentence is spoken — normally exactly ONE shape for the exact thing the sentence is about. they play in order. so DON'T dump the whole drawing at once — spread the shapes across the steps, one idea per step.
+"steps" is an ordered list of narration moments. "say" is the sentence the narrator speaks at that moment — keep it natural; DO NOT change how you phrase the spoken explanation. "draw" is the annotation(s) that appear WHILE that sentence is spoken, and they play in order.
+
+BE VISUALLY ACTIVE — this is the most important rule for "draw". Annotate GENEROUSLY: for EACH step, point at EVERY on-screen thing its sentence references. If the sentence names a button, a field, and a value, draw all THREE shapes in that step — not one. Aim for a rich, busy explainer where almost everything you say is also shown on screen, so prefer MORE relevant shapes per step over fewer. Every step that has anything visible to point at MUST carry at least one shape — never describe a visible element without annotating it. The one limit: only draw what THIS sentence is about (don't pre-draw a later step's targets); within that, be as visually thorough as the screen allows.
 
 "accumulate" controls how steps are displayed:
 - DEFAULT false — each step REPLACES the previous one: a shape appears, then disappears as the next step's shape appears. use this for navigation, UI pointing, "how do I…", coding, and most explanations — only the thing currently being discussed should be on screen.
@@ -108,13 +110,27 @@ supported shapes (coordinates are PIXELS of the screenshot you were given, origi
 - {"shape":"line","from":[x,y],"to":[x,y]}   a plain line
 - {"shape":"label","x":x,"y":y,"text":"short text"}   just text at a point
 
+CHOOSE THE SHAPE THAT FITS WHAT YOU'RE SAYING — don't default to boxes; match the gesture a real tutor would make with a pen:
+- POINTING at a specific control, element, value, or spot -> "arrow" from nearby open space TO the target, tip landing exactly on it. this is the default for "click X", "see this button", "notice that icon", "this number".
+- ISOLATING or grouping a region, an icon, a shape, or a part of a diagram -> "circle" around it. use "box" ONLY for a genuinely rectangular area (a panel, toolbar, card, dialog, or text field) — not as a catch-all.
+- a DIMENSION, DISTANCE, FLOW, or PATH ("the height of the triangle", "it flows from here to there", "this connects to that", "drag from A to B") -> "line" drawn ALONG that exact path. ORDER from/to by the natural direction, because it animates drawing from "from" to "to": a HEIGHT goes from the TOP point ("from") DOWN to the bottom ("to"); a flow/arrow-of-time goes from source ("from") to destination ("to").
+- HIGHLIGHTING a line or range of code/text -> the "highlight" band.
+- favor arrows, circles, and lines for an expressive, hand-drawn feel; mix shapes across steps rather than repeating the same one.
+- any stroked shape (arrow, line, circle, box) may add "style":"dashed" to render as a dashed CONSTRUCTION line instead of a solid one.
+
+CONSTRUCTIVE ANNOTATIONS — teach like a teacher at a whiteboard, not just a highlighter. you may COMPUTE and place coordinates in EMPTY space (not only on existing elements) to SYNTHESIZE new lines/shapes that make a concept or a calculation visible:
+- EXTEND or COMPLETE a figure: a circle shows a 1cm radius and you say "the diameter is 1 x 2 = 2" -> compute the trajectory through the centre and draw the MISSING half so the full diameter is shown; do not just re-highlight the existing radius.
+- SPAN a dimension: you say "the width is the two top circles' diameters combined" -> compute the outer-left edge of the left circle and the outer-right edge of the right circle and draw ONE horizontal line spanning the whole width.
+- mark every constructed/inferred shape with "style":"dashed", so it reads as YOUR added construction line, visually distinct from what is actually on the screen.
+RESTRAINT: synthesize a constructive shape ONLY when it directly bridges a cognitive gap or makes a calculation visible — it must be strictly necessary to aid understanding. never add inferred geometry just to decorate, and never duplicate a line that is already on screen. when in doubt, point at what is there.
+
 rules:
 - the question may come from imperfect speech-to-text and may contain transcription errors — homophones, brand names, or wrong/dropped small words (e.g. "Cloud" likely means "Claude"; "this what page" likely means "this web page"). interpret it CHARITABLY using what's actually visible on screen; answer the question the user clearly meant.
-- the "say" sentence and its "draw" shape MUST match: whatever the sentence names is exactly what that step draws and where.
-- point at things that are ACTUALLY visible in the screenshot, at their real pixel locations.
+- the "say" sentence and its "draw" shapes MUST match: annotate EVERYTHING the sentence names — each distinct element, value, or region it mentions gets its own shape, placed exactly on the real thing. a sentence that references three on-screen items should produce three shapes, not one.
+- point at things that are ACTUALLY visible in the screenshot, at their real pixel locations — the ONE exception is the deliberate constructive lines described above, which you may place in inferred/empty space.
 - BE PRECISE with coordinates. read them carefully off the image: an arrow's "to" point must land exactly ON the target element; a box must tightly enclose it (not float beside or below it); a circle must be centered on it. when unsure, prefer an arrow pointing at the element over a box around an approximate region.
 - keep each "say" to one natural spoken sentence; keep labels to a few words. for a pure explanation you may use several steps; for a task, usually ONE action step per turn.
-- if the request needs no drawing at all, return a single step with the answer in "say" and "draw":[].
+- "draw":[] (no annotation) is ONLY for a step whose sentence points at nothing on screen — a purely abstract remark. if anything visible relates to what you're saying, annotate it; an empty "draw" should be rare.
 - output ONLY the JSON object. no preamble, no markdown fences, no text outside the JSON.`;
 
 // Pull every [DRAW:{...}] block out of the model's reply and parse each as JSON.
@@ -413,13 +429,68 @@ function resolveLineRefs(steps, ocrLines, imageWidth, imageHeight) {
   }));
 }
 
+// Incremental parser for the STREAMED Teacher JSON. Fed the GROWING response text
+// each tick, it returns any newly-completed step objects inside "steps":[...] (plus
+// the top-level done/accumulate once the array starts), so playback can begin on
+// step 0 while the rest still generates. String/escape/brace-depth aware (a step's
+// "draw" holds nested shape objects). The end-of-stream parseSteps() reconciliation
+// in askAboutScreen is the safety net if anything here misses a step.
+function createStepStreamParser() {
+  let cursor = -1; // scan position inside the steps array; -1 until "[" is found
+  let metaEmitted = false;
+
+  // Index just past the matching "}" of the object starting at buf[from] ("{"),
+  // or -1 if it hasn't fully arrived yet. Honors strings and \-escapes.
+  function objectEnd(buf, from) {
+    let depth = 0, inStr = false, esc = false;
+    for (let i = from; i < buf.length; i++) {
+      const c = buf[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === '"') inStr = false;
+      } else if (c === '"') inStr = true;
+      else if (c === "{") depth++;
+      else if (c === "}") { if (--depth === 0) return i + 1; }
+    }
+    return -1;
+  }
+
+  return function feed(buf) {
+    const out = { steps: [], meta: null };
+    if (!metaEmitted) {
+      const start = buf.match(/"steps"\s*:\s*\[/);
+      if (start) {
+        const head = buf.slice(0, start.index); // done/accumulate precede the array
+        const dm = head.match(/"done"\s*:\s*(true|false)/);
+        const am = head.match(/"accumulate"\s*:\s*(true|false)/);
+        out.meta = { done: dm ? dm[1] === "true" : true, accumulate: am ? am[1] === "true" : false };
+        metaEmitted = true;
+        cursor = start.index + start[0].length;
+      }
+    }
+    if (cursor === -1) return out; // the steps array hasn't begun
+    while (cursor < buf.length) {
+      while (cursor < buf.length && " \n\r\t,".includes(buf[cursor])) cursor++; // skip separators
+      if (cursor >= buf.length || buf[cursor] === "]") break; // end of array (or nothing yet)
+      if (buf[cursor] !== "{") break; // not an object start (incomplete / stray)
+      const end = objectEnd(buf, cursor);
+      if (end === -1) break; // this step object is still streaming
+      const slice = buf.slice(cursor, end);
+      cursor = end;
+      try { out.steps.push(JSON.parse(slice)); } catch { /* reconciliation recovers it */ }
+    }
+    return out;
+  };
+}
+
 // Ask the vision model about the current screen.
 //   question   — the user's goal (used as the prompt on the first turn).
 //   turnText   — overrides the prompt text on later guide turns ("the user acted…").
 //   history    — prior turns (Anthropic message objects, text-only) for guide mode.
 // Returns { ok, steps, explanation, done, raw }. `done:false` means the guide
 // loop should watch for the user to act, then call again with the new screen.
-async function askAboutScreen({ imageBase64, mediaType = "image/png", question, imageWidth, imageHeight, history = [], turnText = null, model, ocrLines = [] }) {
+async function askAboutScreen({ imageBase64, mediaType = "image/png", question, imageWidth, imageHeight, history = [], turnText = null, model, ocrLines = [], onStep = null, onMeta = null, signal = null }) {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) return { ok: false, error: "ANTHROPIC_API_KEY is missing — set it in Settings or .env" };
 
@@ -446,6 +517,10 @@ async function askAboutScreen({ imageBase64, mediaType = "image/png", question, 
     ],
   };
 
+  // Streaming only when the caller wants step-by-step delivery (onStep). Otherwise
+  // we buffer the whole reply exactly as before — a safe fallback for any caller.
+  const streaming = typeof onStep === "function";
+  const snap = (stepsArr) => (useOcr ? resolveLineRefs(stepsArr, ocrLines, imageWidth, imageHeight) : stepsArr);
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -454,6 +529,7 @@ async function askAboutScreen({ imageBase64, mediaType = "image/png", question, 
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
       },
+      ...(signal ? { signal } : {}),
       body: JSON.stringify({
         model: resolveModel(model),
         max_tokens: 2048,
@@ -461,19 +537,80 @@ async function askAboutScreen({ imageBase64, mediaType = "image/png", question, 
         // don't reprocess it each step — lowers time-to-first-token on turns 2+.
         system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
         messages: [...history, userTurn],
+        ...(streaming ? { stream: true } : {}),
       }),
     });
 
     if (!res.ok) return { ok: false, error: `Anthropic ${res.status}: ${await res.text()}` };
-    const data = await res.json();
-    // Take the TEXT block(s) — content[0] can be a "thinking" block (adaptive thinking).
-    const text = (data.content || []).filter((c) => c && c.type === "text").map((c) => c.text || "").join("").trim();
-    const parsed = parseSteps(text);
-    // Snap any line-referenced shapes onto the real OCR rects (Sonnet path); a
-    // no-op when ocrLines is empty (Opus) or the model used raw pixel coords.
-    const steps = useOcr ? resolveLineRefs(parsed.steps, ocrLines, imageWidth, imageHeight) : parsed.steps;
-    return { ok: true, steps, explanation: parsed.explanation, done: parsed.done, accumulate: parsed.accumulate, raw: text };
+
+    // ---- Buffered path (no onStep): unchanged behavior --------------------
+    if (!streaming) {
+      const data = await res.json();
+      // Take the TEXT block(s) — content[0] can be a "thinking" block (adaptive thinking).
+      const text = (data.content || []).filter((c) => c && c.type === "text").map((c) => c.text || "").join("").trim();
+      const parsed = parseSteps(text);
+      // Snap any line-referenced shapes onto the real OCR rects (Sonnet path); a
+      // no-op when ocrLines is empty (Opus) or the model used raw pixel coords.
+      return { ok: true, steps: snap(parsed.steps), explanation: parsed.explanation, done: parsed.done, accumulate: parsed.accumulate, raw: text };
+    }
+
+    // ---- Streaming path: emit each step the instant it parses -------------
+    const feedSteps = createStepStreamParser(); // returns the feed() fn directly
+    const decoder = new TextDecoder();
+    const reader = res.body.getReader();
+    let full = ""; // accumulated model text (the JSON we're parsing)
+    let sse = ""; // partial SSE line buffer
+    let emitted = 0;
+
+    // Normalize each step exactly like parseSteps (trim say, keep only object shapes,
+    // drop fully-empty steps) so the streamed path is identical to the buffered one.
+    const norm = (s) => ({
+      say: String((s && s.say) || "").trim(),
+      draw: Array.isArray(s && s.draw) ? s.draw.filter((d) => d && typeof d === "object") : [],
+    });
+    const consume = (delta) => {
+      if (!delta) return;
+      full += delta;
+      const { steps, meta } = feedSteps(full);
+      if (meta && onMeta) onMeta(meta);
+      for (const raw of steps) {
+        const step = norm(raw);
+        if (!step.say && !step.draw.length) continue; // skip empties, like parseSteps
+        const resolved = snap([step])[0]; // per-step line-snap (stateless across steps)
+        if (resolved) onStep(resolved, emitted++);
+      }
+    };
+
+    for (;;) {
+      const { done: rDone, value } = await reader.read();
+      if (rDone) break;
+      sse += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = sse.indexOf("\n")) !== -1) {
+        const line = sse.slice(0, nl).trim();
+        sse = sse.slice(nl + 1);
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+        let evt;
+        try { evt = JSON.parse(payload); } catch { continue; }
+        if (evt.type === "content_block_delta" && evt.delta && evt.delta.type === "text_delta") {
+          consume(evt.delta.text || "");
+        } else if (evt.type === "error") {
+          throw new Error((evt.error && evt.error.message) || "Anthropic stream error");
+        }
+      }
+    }
+
+    // Safety net: reconcile against a full parse so we never emit fewer steps than
+    // the buffered path would — recovers any step the incremental parser missed.
+    const parsed = parseSteps(full);
+    const finalSteps = snap(parsed.steps);
+    for (let i = emitted; i < finalSteps.length; i++) onStep(finalSteps[i], emitted++);
+
+    return { ok: true, raw: full, done: parsed.done, accumulate: parsed.accumulate, stepCount: emitted };
   } catch (err) {
+    if (err && err.name === "AbortError") return { ok: false, error: "aborted", aborted: true };
     return { ok: false, error: String(err.message || err) };
   }
 }
@@ -527,6 +664,7 @@ async function cleanVoiceQuery(rawText) {
 
 module.exports = {
   askAboutScreen,
+  createStepStreamParser,
   cleanVoiceQuery,
   parseSteps,
   parseDrawInstructions,
